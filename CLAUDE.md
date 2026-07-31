@@ -19,7 +19,7 @@ The repo root is also the plugin root. Claude Code discovers a `SKILL.md` at a
 plugin root, which is why there's no `skills/` subdirectory — do not add one
 without also updating both manifests.
 
-Published at `ThatCrispyToast/session-transcripts` (private). Users install with
+Published at `ThatCrispyToast/session-transcripts`. Users install with
 `/plugin marketplace add ThatCrispyToast/session-transcripts` then
 `/plugin install session-transcripts@session-transcripts`.
 

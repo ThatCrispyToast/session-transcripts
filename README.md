@@ -27,8 +27,8 @@ $ transcript.py outline c93a1254
 Available next session. Then ask for it however you'd say it out loud: "what did
 we do last time", "find the session where we fixed the auth bug".
 
-The repo is private, so the clone goes over SSH using your git credentials. Set
-`CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1` if you want HTTPS.
+`owner/repo` sources clone over SSH. Set `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1` if
+you don't have a key loaded.
 
 Nothing to install for the script itself. Python 3, no dependencies:
 
@@ -122,7 +122,7 @@ there, which is why there's no `skills/` subdirectory.
 To hack on it, clone and symlink instead of installing:
 
 ```bash
-git clone git@github.com:ThatCrispyToast/session-transcripts.git
+git clone https://github.com/ThatCrispyToast/session-transcripts.git
 ln -s "$PWD/session-transcripts" ~/.claude/skills/session-transcripts
 ```
 
