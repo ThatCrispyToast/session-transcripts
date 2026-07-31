@@ -36,7 +36,7 @@ Nothing to install for the script itself. Python 3, no dependencies:
 python3 scripts/transcript.py list --all --since 7d
 ```
 
-## Three commands, in that order
+## Usage
 
 `list` finds the session. `outline` prints one line per turn. `show --range`
 renders the turns you picked out.
@@ -80,10 +80,11 @@ Two commands sit outside the main flow: `projects` lists every directory that ha
 transcripts, and `search` runs a regex across them (`--all` to leave the current
 project).
 
-## The two things that make this hard
+## The transcript format
 
-Neither is documented. Both produce plausible wrong output instead of an error,
-which is the worst way for a parser to fail.
+Two things here will break a naive parser. Neither is documented, and both
+produce plausible wrong output instead of an error, which is the worst way for a
+parser to fail.
 
 **One assistant response is split across several records.** Each holds a single
 content block, and they all share `message.id`. Render them one per turn and an
@@ -129,7 +130,7 @@ ln -s "$PWD/session-transcripts" ~/.claude/skills/session-transcripts
 `SKILL.md` edits take effect in the running session. Don't do both - the plugin
 and the symlink will each load the skill.
 
-## Odds and ends
+## Notes
 
 - The session you're in is still being written, so its transcript is incomplete.
 - Sessions are keyed by working directory, not by repo. Rename a project and the
