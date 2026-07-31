@@ -3,8 +3,8 @@
 Read past [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions
 as text a model can use. Claude Code appends every session to
 `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` - raw event logs, one JSON
-record per content block, mixed in with harness bookkeeping. This skill renders
-them. Find the session, outline it, pull only the turns that matter.
+record per content block. This skill renders them: find the session, outline it,
+pull only the turns that matter. A 1.9 MB transcript outlines to 11 KB.
 
 ```
 $ transcript.py outline c93a1254
@@ -17,37 +17,22 @@ $ transcript.py outline c93a1254
 
 ## Install
 
-Run these two inside Claude Code:
-
 ```
 /plugin marketplace add ThatCrispyToast/session-transcripts
 /plugin install session-transcripts@session-transcripts
 ```
 
-Claude Code builds its skill list at session start, so the skill shows up in your
-next session, not the one you're in. Update it later with `/plugin update
-session-transcripts`.
-
-The repo is private, so the clone needs your git credentials. `owner/repo`
-sources clone over SSH by default, which works if your key is in `ssh-agent`. To
-go over HTTPS instead, set `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1` and run
-`gh auth setup-git` first.
-
-Then ask for it in plain language. It triggers on "what did we do last time",
+Available next session. Then ask in plain language: "what did we do last time",
 "find the session where we fixed the auth bug", "recover what got compacted".
 
-You can also skip Claude Code entirely and run the script - Python 3, stdlib
-only, nothing to install:
+The repo is private, so the clone uses your git credentials over SSH. For HTTPS,
+set `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`.
+
+The script also runs standalone - Python 3, stdlib only:
 
 ```bash
 python3 scripts/transcript.py list --all --since 7d
 ```
-
-> [!IMPORTANT]
-> Never dump a whole transcript into context. A long session runs ~2 MB of JSONL.
-> Go `list` → `outline` → `show --range N-M`. The largest transcript on this
-> machine is 1.9 MB. It comes out at 11 KB as an outline (170×) or 190 KB fully
-> rendered (10×).
 
 ## What it does
 
@@ -118,13 +103,13 @@ python3 $T search "flaky test" --all     # regex across transcripts
 | `--no-sidechains` | drop subagent turns |
 | `--meta` | include system-injected messages |
 
-The defaults assume you're reading in context. When a clipped result holds the
-thing you need, re-run that one turn with `--range N --full`.
+When a clipped result holds the thing you need, re-run that turn with
+`--range N --full`.
 
 ## Two traps in the format
 
-Both wreck naive parsing, and both fail quietly. This parser handles them, and
-[`reference/format.md`](reference/format.md) documents them.
+Both wreck naive parsing, and both fail quietly.
+[`reference/format.md`](reference/format.md) has the details.
 
 **An assistant response spans several records.** Each carries one content block -
 `thinking`, `text`, or `tool_use` - and they all share `message.id`. One record
@@ -147,19 +132,19 @@ positives.
 | `reference/format.md` | the JSONL schema, read only when working with raw records |
 | `.claude-plugin/` | `plugin.json` and `marketplace.json`, so the repo installs as a plugin |
 
-The repo root doubles as the plugin root, and Claude Code picks up a `SKILL.md`
-sitting there. Nothing needs a `skills/` subdirectory.
+The repo root doubles as the plugin root, where Claude Code picks up a bare
+`SKILL.md`. No `skills/` subdirectory needed.
 
 ## Working on it
 
-Clone it and point your skills directory at the clone:
+Clone it and point your skills directory at it:
 
 ```bash
 git clone git@github.com:ThatCrispyToast/session-transcripts.git
 ln -s "$PWD/session-transcripts" ~/.claude/skills/session-transcripts
 ```
 
-Edits to `SKILL.md` land in the running session. Run `claude plugin validate .`
+`SKILL.md` edits land in the running session. Run `claude plugin validate .`
 after touching either manifest.
 
 Pick one method or the other. Doing both loads the skill twice.
