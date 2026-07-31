@@ -8,6 +8,7 @@
   },
   "homepage": "https://github.com/ThatCrispyToast/session-transcripts",
   "repository": "https://github.com/ThatCrispyToast/session-transcripts",
+  "license": "MIT",
   "keywords": [
     "transcripts",
     "sessions",

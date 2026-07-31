@@ -135,3 +135,8 @@ and the symlink will each load the skill.
 - Sessions are keyed by working directory, not by repo. Rename a project and the
   old transcripts stay under the old path; `list --all` still turns them up.
 - Timestamps display local. The records store UTC.
+
+## License
+
+[MIT](LICENSE). Unaffiliated with Anthropic. The transcript format is
+undocumented and can change in any Claude Code release.
