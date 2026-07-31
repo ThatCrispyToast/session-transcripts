@@ -1,10 +1,12 @@
 # Session Transcripts
 
-Read past [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions
-as text a model can use. Claude Code appends every session to
-`~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` - raw event logs, one JSON
-record per content block. This skill renders them: find the session, outline it,
-pull only the turns that matter. A 1.9 MB transcript outlines to 11 KB.
+Claude Code writes every session to
+`~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`: one JSON record per
+content block, interleaved with harness bookkeeping. Nobody was meant to read it
+directly, and a model that tries spends its context on `parentUuid` fields.
+
+This renders it instead. The largest transcript on my disk is 1.9 MB. As an
+outline it's 11 KB.
 
 ```
 $ transcript.py outline c93a1254
@@ -22,138 +24,114 @@ $ transcript.py outline c93a1254
 /plugin install session-transcripts@session-transcripts
 ```
 
-Available next session. Then ask in plain language: "what did we do last time",
-"find the session where we fixed the auth bug", "recover what got compacted".
+Available next session. Then ask for it however you'd say it out loud: "what did
+we do last time", "find the session where we fixed the auth bug".
 
-The repo is private, so the clone uses your git credentials over SSH. For HTTPS,
-set `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1`.
+The repo is private, so the clone goes over SSH using your git credentials. Set
+`CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1` if you want HTTPS.
 
-The script also runs standalone - Python 3, stdlib only:
+Nothing to install for the script itself. Python 3, no dependencies:
 
 ```bash
 python3 scripts/transcript.py list --all --since 7d
 ```
 
-## What it does
+## Three commands, in that order
 
-- **Finds the session** - `list` covers one project or all of them, filtered by
-  age or by a regex over title and first prompt. Sessions group by working
-  directory, not by git repo.
-- **Outlines before it renders** - one line per turn: timestamp, snippet, and the
-  tools that turn called (`{Read, Bash}`). Turn numbers hold steady across every
-  flag, so an outline and a later `show` always agree.
-- **Renders only the slice you ask for** - by range, by `--last N`, or by regex
-  with `-C` turns of context. Tool results fold in under the call that produced
-  them (`▶` call, `⤷` result), clipped to 20 lines unless you say otherwise.
-- **Flags rewound branches** - edit a message and re-run, and both branches stay
-  in the file. Abandoned turns carry a label and an `!`, so you never mistake a
-  rewind for what happened.
-- **Searches across history** - regex over every transcript on disk, one line per
-  hit or fully rendered with `--render`.
-
-## How it works
-
-```
-~/.claude/projects/<encoded-cwd>/<session-id>.jsonl
-        │  one JSON record per content block
-        ▼
-iter_records  ──  skip bookkeeping types, tolerate unknown ones
-        ▼
-build_turns   ──  merge assistant records sharing message.id
-              ──  attach tool_result records to the call they answer
-        ▼
-mark_abandoned ─  strict rewind detection (two real prompts, one parent)
-        ▼
-outline (1 line/turn)  ·  show (folded tool I/O)  ·  search (regex)
-```
-
-Everything here comes from surveying ~400 transcripts written by Claude Code
-2.1.x. Anthropic documents none of it, so the parser skips record types it
-doesn't recognize instead of dying on them.
-
-## Commands
+`list` finds the session. `outline` prints one line per turn. `show --range`
+renders the turns you picked out.
 
 ```bash
 T=scripts/transcript.py
 
-python3 $T projects                      # every project with transcripts, newest first
-python3 $T list                          # sessions for the current directory
-python3 $T list --all --since 7d         # across all projects, last week
-python3 $T list --grep auth              # match on title / first prompt / id
-
-python3 $T outline <session>             # one line per turn - start here
-python3 $T show <session> --range 40-60  # render just those turns
-python3 $T show <session> --grep docker -C 3
-
-python3 $T search "flaky test" --all     # regex across transcripts
+python3 $T list --all --since 7d      # newest first, filtered by age
+python3 $T list --grep auth           # or by title / first prompt / id
+python3 $T outline c93a1254           # an id prefix works, so does 'latest'
+python3 $T show c93a1254 --range 40-60
 ```
 
-`<session>` takes a full session id, a unique id prefix (`c93a1254`), a path to a
-`.jsonl`, or `latest`.
+Skipping the outline puts you back to dumping 190 KB into context, which is the
+thing this exists to avoid.
+
+An outline line:
+
+```
+ [   4] 11:49:08 ASST   Found description.txt locally. Now let me check… {Read, Bash}
+```
+
+`[4]` is what you pass to `--range`. The braces list tools that turn called. Turn
+numbers never shift between commands, so an outline and a later `show` always
+agree - numbering happens before filtering, on purpose. In `show`, `▶` marks a
+tool call and `⤷` its result, folded in underneath.
 
 | Flag | Effect |
 |---|---|
 | `--range N-M` | turns N to M (`N`, `N-`, `-M` also work) |
-| `--last N` | last N turns - good for "how did the session end" |
-| `--grep RE` / `-C N` | only matching turns, with N turns of context |
-| `--thinking` | include reasoning blocks (hidden by default) |
-| `--full` | no truncation anywhere - use on a narrow `--range` |
+| `--last N` | how did the session end |
+| `--grep RE` / `-C N` | matching turns, with N turns of context |
+| `--thinking` | reasoning blocks, hidden otherwise |
+| `--full` | no truncation at all; use it on one turn, not a session |
 | `--max-lines N` | lines per tool result, default 20 |
 | `--main-branch` | drop rewound branches |
 | `--no-sidechains` | drop subagent turns |
-| `--meta` | include system-injected messages |
+| `--meta` | system-injected messages |
 
-When a clipped result holds the thing you need, re-run that turn with
-`--range N --full`.
+Two commands sit outside the main flow: `projects` lists every directory that has
+transcripts, and `search` runs a regex across them (`--all` to leave the current
+project).
 
-## Two traps in the format
+## The two things that make this hard
 
-Both wreck naive parsing, and both fail quietly.
-[`reference/format.md`](reference/format.md) has the details.
+Neither is documented. Both produce plausible wrong output instead of an error,
+which is the worst way for a parser to fail.
 
-**An assistant response spans several records.** Each carries one content block -
-`thinking`, `text`, or `tool_use` - and they all share `message.id`. One record
-per turn inflated an 11-turn session to 19 and cut every tool call away from the
-sentence introducing it. Merge by `message.id`.
+**One assistant response is split across several records.** Each holds a single
+content block, and they all share `message.id`. Render them one per turn and an
+11-turn session reports as 19, every tool call divorced from the sentence that
+introduced it. Merge on `message.id`.
 
-**`parentUuid` branching lies.** A parent with several children is normal: an
-assistant's next content block and the `tool_result` answering its tool call both
-hang off the same parent. Treating that as a fork flagged 27 of ~400 transcripts
-as rewound. The strict signal - two real user prompts sharing one `parentUuid`,
-where "real" excludes tool results and `isMeta` records - finds 2, with no false
-positives.
+**`parentUuid` looks like it tracks rewinds. It doesn't.** A parent with several
+children is the ordinary case - an assistant's next content block and the
+`tool_result` answering its tool call both hang off the same parent. My first
+detector read that as a fork and called 27 of ~400 transcripts rewound. The real
+signal is two genuine user prompts sharing one `parentUuid`, where "genuine"
+excludes tool results and `isMeta` records. That finds 2, and both are real.
+
+Rewound branches stay in the file, so they get a label and an `!` in the outline
+rather than disappearing. Reporting an abandoned turn as what happened is worse
+than showing both. `--main-branch` hides them when you want the conversation as
+it finally stood.
+
+Everything above came out of surveying ~400 transcripts from Claude Code 2.1.x.
+The format is undocumented and moves between releases, so the parser ignores
+record types it doesn't know rather than falling over.
+[`reference/format.md`](reference/format.md) has the schema.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `SKILL.md` | the skill itself - frontmatter triggers, then the wide-to-narrow workflow |
-| `scripts/transcript.py` | the renderer; stdlib Python 3, five subcommands |
-| `reference/format.md` | the JSONL schema, read only when working with raw records |
-| `.claude-plugin/` | `plugin.json` and `marketplace.json`, so the repo installs as a plugin |
+| `SKILL.md` | the skill: frontmatter triggers, then the workflow |
+| `scripts/transcript.py` | the renderer, ~1100 lines of stdlib Python |
+| `reference/format.md` | the JSONL schema |
+| `.claude-plugin/` | manifests, so `/plugin marketplace add` works |
 
-The repo root doubles as the plugin root, where Claude Code picks up a bare
-`SKILL.md`. No `skills/` subdirectory needed.
+The repo root is also the plugin root. Claude Code picks up a `SKILL.md` sitting
+there, which is why there's no `skills/` subdirectory.
 
-## Working on it
-
-Clone it and point your skills directory at it:
+To hack on it, clone and symlink instead of installing:
 
 ```bash
 git clone git@github.com:ThatCrispyToast/session-transcripts.git
 ln -s "$PWD/session-transcripts" ~/.claude/skills/session-transcripts
 ```
 
-`SKILL.md` edits land in the running session. Run `claude plugin validate .`
-after touching either manifest.
+`SKILL.md` edits take effect in the running session. Don't do both - the plugin
+and the symlink will each load the skill.
 
-Pick one method or the other. Doing both loads the skill twice.
+## Odds and ends
 
-## Notes
-
-- Claude Code writes the current session's transcript live, so it's always
-  incomplete.
-- `search` scans the current project unless you pass `--all`.
-- Timestamps render in local time; the records store UTC.
-- Renaming a project directory leaves its old transcripts where they are, filed
-  under the path they came from. `list --all` still finds them.
+- The session you're in is still being written, so its transcript is incomplete.
+- Sessions are keyed by working directory, not by repo. Rename a project and the
+  old transcripts stay under the old path; `list --all` still turns them up.
+- Timestamps display local. The records store UTC.
