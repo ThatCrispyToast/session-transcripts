@@ -33,7 +33,7 @@ you don't have a key loaded.
 Nothing to install for the script itself. Python 3, no dependencies:
 
 ```bash
-python3 scripts/transcript.py list --all --since 7d
+python3 skills/session-transcripts/scripts/transcript.py list --all --since 7d
 ```
 
 ## Human Use
@@ -42,7 +42,7 @@ python3 scripts/transcript.py list --all --since 7d
 renders the turns you picked out.
 
 ```bash
-T=scripts/transcript.py
+T=skills/session-transcripts/scripts/transcript.py
 
 python3 $T list --all --since 7d      # newest first, filtered by age
 python3 $T list --grep auth           # or by title / first prompt / id
@@ -112,26 +112,27 @@ Both halves of a rewind stay on disk. The outline marks the abandoned side with
 `!` rather than hiding it; `--main-branch` hides it when you want the
 conversation as it finally stood.
 
-[`reference/format.md`](reference/format.md) has the rest: record types,
+[`format.md`](skills/session-transcripts/reference/format.md) has the rest: record types,
 the `toolUseResult` shapes per tool, and the lossy cwd encoding.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `SKILL.md` | the skill: frontmatter triggers, then the workflow |
-| `scripts/transcript.py` | the renderer, ~1100 lines of stdlib Python |
-| `reference/format.md` | the JSONL schema |
+| `skills/session-transcripts/SKILL.md` | the skill: frontmatter triggers, then the workflow |
+| `skills/session-transcripts/scripts/transcript.py` | the renderer, ~1100 lines of stdlib Python |
+| `skills/session-transcripts/reference/format.md` | the JSONL schema |
 | `.claude-plugin/` | manifests, so `/plugin marketplace add` works |
 
-The repo root is also the plugin root. Claude Code picks up a `SKILL.md` sitting
-there, which is why there's no `skills/` subdirectory.
+The repo is the plugin; the skill sits under `skills/` where Claude Code finds it
+by convention. Room for a second one later.
 
-To hack on it, clone and symlink instead of installing:
+To hack on it, clone and symlink the skill directory instead of installing:
 
 ```bash
 git clone https://github.com/ThatCrispyToast/session-transcripts.git
-ln -s "$PWD/session-transcripts" ~/.claude/skills/session-transcripts
+ln -s "$PWD/session-transcripts/skills/session-transcripts" \
+      ~/.claude/skills/session-transcripts
 ```
 
 `SKILL.md` edits take effect in the running session. Don't do both - the plugin

@@ -6,18 +6,22 @@ Guidance for working *on* this repo. For using the tool, read `README.md` or
 ## What this is
 
 A Claude Code skill that renders session transcript JSONL into readable text.
-Three files carry everything:
+Three files carry everything, all under `skills/session-transcripts/`:
 
 | Path | Role |
 |---|---|
 | `SKILL.md` | frontmatter (`name`, `description`, `allowed-tools`) plus the workflow the model follows. The `description` is the trigger — edit it only with intent. |
 | `scripts/transcript.py` | the whole implementation, ~1100 lines, single file |
 | `reference/format.md` | the JSONL schema; progressive disclosure, loaded only for raw-record work |
-| `.claude-plugin/` | `plugin.json` + `marketplace.json`; makes the repo installable via `/plugin marketplace add` |
 
-The repo root is also the plugin root. Claude Code discovers a `SKILL.md` at a
-plugin root, which is why there's no `skills/` subdirectory — do not add one
-without also updating both manifests.
+At the repo root, `.claude-plugin/` holds `plugin.json` + `marketplace.json` and
+makes the repo installable via `/plugin marketplace add`.
+
+The repo is the plugin, and Claude Code auto-discovers `skills/*/SKILL.md` inside
+it — neither manifest names the skill, so adding a second one needs no manifest
+change. Paths inside `SKILL.md` resolve against `$CLAUDE_SKILL_DIR`, so they
+survive a move; paths in this file and in `README.md` are repo-relative and do
+not.
 
 Published at `ThatCrispyToast/session-transcripts`. Users install with
 `/plugin marketplace add ThatCrispyToast/session-transcripts` then
@@ -27,7 +31,7 @@ Published at `ThatCrispyToast/session-transcripts`. Users install with
 
 - **Stdlib only.** No dependencies, no venv, no install step. The skill has to run
   from a bare `python3`. Do not add imports outside the standard library.
-- **Single file.** `scripts/transcript.py` stays self-contained; it is invoked by
+- **Single file.** `transcript.py` stays self-contained; it is invoked by
   path, not imported.
 - **Never break the read-only contract.** This tool only reads
   `~/.claude/projects`. It must not write, move, or delete anything there.
@@ -84,11 +88,12 @@ would.
 
 ```bash
 # every transcript renders under every flag combination, no traceback
-python3 scripts/transcript.py list --all --limit 9999 --include-empty
+python3 skills/session-transcripts/scripts/transcript.py list --all --limit 9999 --include-empty
 
+T=skills/session-transcripts/scripts/transcript.py
 for f in ~/.claude/projects/*/*.jsonl; do
-  python3 scripts/transcript.py outline "$f" >/dev/null || echo "FAIL outline $f"
-  python3 scripts/transcript.py show "$f" --full --thinking --meta >/dev/null \
+  python3 "$T" outline "$f" >/dev/null || echo "FAIL outline $f"
+  python3 "$T" show "$f" --full --thinking --meta >/dev/null \
     || echo "FAIL show $f"
 done
 ```
