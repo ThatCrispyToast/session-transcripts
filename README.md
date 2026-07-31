@@ -82,31 +82,38 @@ project).
 
 ## The transcript format
 
-Two things here will break a naive parser. Neither is documented, and both
-produce plausible wrong output instead of an error, which is the worst way for a
-parser to fail.
+One JSON object per line. `type` says what it is: `user`, `assistant`, `system`,
+and a dozen bookkeeping variants. Only the first two carry conversation.
 
-**One assistant response is split across several records.** Each holds a single
-content block, and they all share `message.id`. Render them one per turn and an
-11-turn session reports as 19, every tool call divorced from the sentence that
-introduced it. Merge on `message.id`.
+An assistant response is not one record. Every content block gets its own line,
+tied together by `message.id`. Turn 5 in the outline above is three of them:
 
-**`parentUuid` looks like it tracks rewinds. It doesn't.** A parent with several
-children is the ordinary case - an assistant's next content block and the
-`tool_result` answering its tool call both hang off the same parent. The obvious
-detector reads that as a fork and flags 27 of ~400 transcripts as rewound. The
-real signal is two genuine user prompts sharing one `parentUuid`, where "genuine"
-excludes tool results and `isMeta` records. That finds 2, and both are real.
+```json
+{"type":"assistant","uuid":"73aa8fef…","message":{"id":"msg_011CdaZ…","content":[{"type":"text","text":"I'll create this skill. Let me…"}]}}
+{"type":"assistant","uuid":"348d27cf…","message":{"id":"msg_011CdaZ…","content":[{"type":"tool_use","name":"Bash"}]}}
+{"type":"assistant","uuid":"63bede02…","message":{"id":"msg_011CdaZ…","content":[{"type":"tool_use","name":"Bash"}]}}
+```
 
-Rewound branches stay in the file, so they get a label and an `!` in the outline
-rather than disappearing. Reporting an abandoned turn as what happened is worse
-than showing both. `--main-branch` hides them when you want the conversation as
-it finally stood.
+Count those as three turns and an 11-turn session renders as 19, tool calls
+stranded from the sentence that introduced them. Group on `message.id` before
+anything else.
 
-Everything above came out of surveying ~400 transcripts from Claude Code 2.1.x.
-The format is undocumented and moves between releases, so the parser ignores
-record types it doesn't know rather than falling over.
-[`reference/format.md`](reference/format.md) has the schema.
+`parentUuid` reads like a linked list and behaves like a tree, where a node with
+several children is completely ordinary: the text block above and the
+`tool_result` answering its Bash call both point at the same parent. Treat any
+fork as a rewind and 27 of ~400 transcripts here look rewound. The true count is
+2.
+
+A rewind is two user prompts under one parent, and `type: "user"` alone doesn't
+identify a prompt - tool results arrive under that type, as does injected context
+flagged `isMeta`. Exclude both and the false positives go away.
+
+Both halves of a rewind stay on disk. The outline marks the abandoned side with
+`!` rather than hiding it; `--main-branch` hides it when you want the
+conversation as it finally stood.
+
+[`reference/format.md`](reference/format.md) has the rest - every record type,
+the `toolUseResult` shapes per tool, and the lossy cwd encoding.
 
 ## Layout
 
