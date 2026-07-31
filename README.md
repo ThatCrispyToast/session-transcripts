@@ -36,7 +36,7 @@ Nothing to install for the script itself. Python 3, no dependencies:
 python3 scripts/transcript.py list --all --since 7d
 ```
 
-## Usage
+## Human Use
 
 `list` finds the session. `outline` prints one line per turn. `show --range`
 renders the turns you picked out.
@@ -80,7 +80,7 @@ Two commands sit outside the main flow: `projects` lists every directory that ha
 transcripts, and `search` runs a regex across them (`--all` to leave the current
 project).
 
-## The transcript format
+## Transcript Format
 
 One JSON object per line. `type` says what it is: `user`, `assistant`, `system`,
 and a dozen bookkeeping variants. Only the first two carry conversation.
@@ -112,7 +112,7 @@ Both halves of a rewind stay on disk. The outline marks the abandoned side with
 `!` rather than hiding it; `--main-branch` hides it when you want the
 conversation as it finally stood.
 
-[`reference/format.md`](reference/format.md) has the rest - every record type,
+[`reference/format.md`](reference/format.md) has the rest: record types,
 the `toolUseResult` shapes per tool, and the lossy cwd encoding.
 
 ## Layout
