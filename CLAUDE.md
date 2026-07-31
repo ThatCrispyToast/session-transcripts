@@ -13,10 +13,15 @@ Three files carry everything:
 | `SKILL.md` | frontmatter (`name`, `description`, `allowed-tools`) plus the workflow the model follows. The `description` is the trigger — edit it only with intent. |
 | `scripts/transcript.py` | the whole implementation, ~1100 lines, single file |
 | `reference/format.md` | the JSONL schema; progressive disclosure, loaded only for raw-record work |
+| `.claude-plugin/` | `plugin.json` + `marketplace.json`; makes the repo installable via `/plugin marketplace add` |
 
-The directory is symlinked to `~/.claude/skills/session-transcripts`, so edits
-here are live for the next session. Not a git repo — nothing is committed. Ask
-before `git init`.
+The repo root is also the plugin root. Claude Code discovers a `SKILL.md` at a
+plugin root, which is why there's no `skills/` subdirectory — do not add one
+without also updating both manifests.
+
+Published at `ThatCrispyToast/session-transcripts` (private). Users install with
+`/plugin marketplace add ThatCrispyToast/session-transcripts` then
+`/plugin install session-transcripts@session-transcripts`.
 
 ## Constraints
 
@@ -94,6 +99,32 @@ sidechain, an `AskUserQuestion`, and a Bash call with both stdout and stderr.
 
 Check the compression ratio when output format changes; it is the tool's reason
 for existing. Target roughly 170× for `outline` and 10× for `show`.
+
+## Releasing
+
+The manifests carry a `version` in two places and they must agree:
+`.claude-plugin/plugin.json` and the plugin entry in
+`.claude-plugin/marketplace.json`. Bump both together — `claude plugin tag`
+refuses to tag when they disagree.
+
+```bash
+claude plugin validate .          # both manifests
+claude plugin marketplace add .   # install from the local path and check
+claude plugin install session-transcripts@session-transcripts
+claude plugin details session-transcripts   # expect: Skills (1) session-transcripts
+```
+
+Undo that local test before pushing, or the plugin keeps resolving to your
+working tree instead of the remote:
+
+```bash
+claude plugin uninstall session-transcripts@session-transcripts
+claude plugin marketplace remove session-transcripts
+```
+
+Users pull changes with `/plugin update session-transcripts`. Version pinning
+means they see nothing until the `version` string changes, so a content fix
+without a bump reaches no one.
 
 ## Conventions
 

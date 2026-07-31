@@ -1,0 +1,16 @@
+{
+  "name": "session-transcripts",
+  "description": "Tooling for reading past Claude Code sessions",
+  "owner": {
+    "name": "Aniket Chadalavada",
+    "url": "https://github.com/ThatCrispyToast"
+  },
+  "plugins": [
+    {
+      "name": "session-transcripts",
+      "source": "./",
+      "version": "1.0.0",
+      "description": "Read, search and summarize transcripts of past Claude Code sessions stored as JSONL under ~/.claude/projects"
+    }
+  ]
+}

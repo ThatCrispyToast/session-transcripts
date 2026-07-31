@@ -15,25 +15,33 @@ $ transcript.py outline c93a1254
  [  35] 13:56:17 ASST   Real rewinds exist in only 2 files - my detector was over-broad… {Edit}
 ```
 
-## Quick start
+## Install
 
-1. **Install it as a skill** - symlink this directory into your skills dir:
+Run these two inside Claude Code:
 
-   ```bash
-   ln -s "$PWD" ~/.claude/skills/session-transcripts
-   ```
+```
+/plugin marketplace add ThatCrispyToast/session-transcripts
+/plugin install session-transcripts@session-transcripts
+```
 
-   Claude Code builds its skill list at session start, so the skill shows up in
-   your next session, not the one you're in.
+Claude Code builds its skill list at session start, so the skill shows up in your
+next session, not the one you're in. Update it later with `/plugin update
+session-transcripts`.
 
-2. **Ask for it in plain language.** It triggers on "what did we do last time",
-   "find the session where we fixed the auth bug", "recover what got compacted".
+The repo is private, so the clone needs your git credentials. `owner/repo`
+sources clone over SSH by default, which works if your key is in `ssh-agent`. To
+go over HTTPS instead, set `CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1` and run
+`gh auth setup-git` first.
 
-3. **Or run the script yourself** - Python 3, stdlib only, nothing to install:
+Then ask for it in plain language. It triggers on "what did we do last time",
+"find the session where we fixed the auth bug", "recover what got compacted".
 
-   ```bash
-   python3 scripts/transcript.py list --all --since 7d
-   ```
+You can also skip Claude Code entirely and run the script - Python 3, stdlib
+only, nothing to install:
+
+```bash
+python3 scripts/transcript.py list --all --since 7d
+```
 
 > [!IMPORTANT]
 > Never dump a whole transcript into context. A long session runs ~2 MB of JSONL.
@@ -137,6 +145,24 @@ positives.
 | `SKILL.md` | the skill itself - frontmatter triggers, then the wide-to-narrow workflow |
 | `scripts/transcript.py` | the renderer; stdlib Python 3, five subcommands |
 | `reference/format.md` | the JSONL schema, read only when working with raw records |
+| `.claude-plugin/` | `plugin.json` and `marketplace.json`, so the repo installs as a plugin |
+
+The repo root doubles as the plugin root, and Claude Code picks up a `SKILL.md`
+sitting there. Nothing needs a `skills/` subdirectory.
+
+## Working on it
+
+Clone it and point your skills directory at the clone:
+
+```bash
+git clone git@github.com:ThatCrispyToast/session-transcripts.git
+ln -s "$PWD/session-transcripts" ~/.claude/skills/session-transcripts
+```
+
+Edits to `SKILL.md` land in the running session. Run `claude plugin validate .`
+after touching either manifest.
+
+Pick one method or the other. Doing both loads the skill twice.
 
 ## Notes
 
