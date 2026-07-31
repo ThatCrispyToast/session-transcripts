@@ -5,8 +5,8 @@ Claude Code writes every session to
 content block, interleaved with harness bookkeeping. Nobody was meant to read it
 directly, and a model that tries spends its context on `parentUuid` fields.
 
-This renders it instead. The largest transcript on my disk is 1.9 MB. As an
-outline it's 11 KB.
+This renders it instead. The largest transcript in a ~400 session survey ran
+1.9 MB. As an outline it's 11 KB.
 
 ```
 $ transcript.py outline c93a1254
@@ -92,9 +92,9 @@ introduced it. Merge on `message.id`.
 
 **`parentUuid` looks like it tracks rewinds. It doesn't.** A parent with several
 children is the ordinary case - an assistant's next content block and the
-`tool_result` answering its tool call both hang off the same parent. My first
-detector read that as a fork and called 27 of ~400 transcripts rewound. The real
-signal is two genuine user prompts sharing one `parentUuid`, where "genuine"
+`tool_result` answering its tool call both hang off the same parent. The obvious
+detector reads that as a fork and flags 27 of ~400 transcripts as rewound. The
+real signal is two genuine user prompts sharing one `parentUuid`, where "genuine"
 excludes tool results and `isMeta` records. That finds 2, and both are real.
 
 Rewound branches stay in the file, so they get a label and an `!` in the outline
