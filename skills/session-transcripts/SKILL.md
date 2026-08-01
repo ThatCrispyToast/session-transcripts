@@ -11,31 +11,39 @@ Those files are raw event logs: one JSON record per content block, interleaved w
 harness bookkeeping. Reading them directly wastes a huge amount of context and is easy
 to misinterpret. `scripts/transcript.py` renders them instead.
 
-Stdlib Python 3, no dependencies, no install:
+Stdlib Python 3, no dependencies, no install. When this skill loads, Claude Code states
+its base directory ("Base directory for this skill: …"). Use that absolute path and set
+it once:
 
 ```bash
-python3 "$CLAUDE_SKILL_DIR/scripts/transcript.py" --help
+T="<skill base directory>/scripts/transcript.py"
+python3 "$T" --help
 ```
 
-If `$CLAUDE_SKILL_DIR` is not set, use the directory this SKILL.md lives in.
+**Do not use `$CLAUDE_SKILL_DIR`** — it is usually not set, and the empty expansion fails
+as `python3: can't open file '/scripts/transcript.py'`, which is easy to misread as the
+skill being broken.
 
 ## Work from wide to narrow
 
 Transcripts are big — a long session is ~2 MB of JSONL. Never dump a whole one into
 context. Narrow down in three steps:
 
-1. **`list`** — find the session
-2. **`outline`** — one line per turn, ~10 KB even for the largest session; read this to
-   locate the turns that matter
+1. **`list`** — find the session. `[rewound]` and `[compacted]` flag sessions whose
+   history needs care; see below.
+2. **`outline`** — one line per turn, ~11 KB even for a 6 MB session; read this to
+   locate the turns that matter. It takes `--range` too, so page it with that rather
+   than piping to `head`.
 3. **`show --range N-M`** — render only those turns
 
-A 1.9 MB transcript is ~11 KB as an outline and ~190 KB fully rendered. Outline first,
-essentially always.
+Outline first, essentially always. Keep `--full` to a handful of turns: `--range 162-190
+--full` returns ~50 KB, which overflows the tool-output limit and lands in a file you
+then have to read back. Narrow the range instead, or raise `--max-lines` a little.
 
 ## Commands
 
 ```bash
-T="$CLAUDE_SKILL_DIR/scripts/transcript.py"
+T="<skill base directory>/scripts/transcript.py"
 
 python3 $T projects                      # every project with transcripts, newest first
 python3 $T list                          # sessions for the current directory's project
@@ -92,11 +100,28 @@ outline, and the header says how many there are. They are shown by default becau
 are real history — pass `--main-branch` to see only the conversation as it finally stood.
 Do not report an abandoned turn as what happened without saying it was rewound.
 
+`list` and `search` both mark these `[rewound]`, which matters when several sessions cover
+one topic: an attempt that was interrupted or rewound often sits in a *different, earlier*
+session than the one where the work finally landed. Answering from the successful session
+alone gives a tidier story than the truth — it silently drops the false start. **When a
+`[rewound]` session shares a topic with the one you are reading, open it before concluding,
+and say that the first attempt was abandoned.**
+
+## Compacted sessions
+
+A long session may have been compacted. `CONTEXT COMPACTED` marks the seam, with the
+token count before and after. Turns above it were summarized out of the model's context,
+so anything the assistant seems to forget just after that point was forgotten for a
+reason. The turns themselves are still in the file and still render — the compaction
+removed them from the model's context, not from the transcript.
+
 ## Notes
 
 - Sessions are grouped by working directory, not by git repo. `list` with no arguments
   uses the current directory; use `--project <path>` or `--all` for anything else.
-- The current session is being written live, so its transcript is incomplete.
+- The session you are in is hidden from `list` and `search` by default. It contains the
+  question you were just asked, so it matches nearly any query and sorts first, crowding
+  out the real answer. `--include-current` brings it back.
 - `search` scans the current project by default; it needs `--all` to go wider.
 - Timestamps render in local time.
 
