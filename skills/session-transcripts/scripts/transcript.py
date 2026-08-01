@@ -39,6 +39,7 @@ NOISE_TYPES = {
     "bridge-session",
     "last-prompt",
     "agent-color",
+    "agent-name",
     "pr-link",
     "queue-operation",
 }
@@ -403,7 +404,10 @@ def render_tool_result(result, block, full, max_lines):
         if result.get("type") == "text" and isinstance(result.get("file"), dict):
             f = result["file"]
             head = f"     ({f.get('numLines', '?')} of {f.get('totalLines', '?')} lines from {f.get('filePath', '?')})"
-            return head + ("\n" + clip(f.get("content", ""), limit) if limit != 0 or full else "")
+            # limit == 0 means "no limit" everywhere else (see clip); keep it consistent
+            # here rather than silently dropping file content.
+            body = clip(f.get("content", ""), limit)
+            return head + ("\n" + body if body else "")
         # Edit / Write
         if "structuredPatch" in result:
             path = result.get("filePath", "?")
@@ -480,6 +484,25 @@ class Turn:
             self.uuid = rec["uuid"]  # keep the latest uuid as the turn's chain anchor
 
 
+def open_assistant_turn(turns):
+    """The assistant turn a following record can still merge into, or None.
+
+    Harness bookkeeping can land between two content blocks of one response -
+    a `read_truncation_notice` attachment, or an injected `isMeta` user record
+    such as an image-rescaling notice. Those are not conversational boundaries,
+    so the response has to merge across them or its tool calls get stranded from
+    the text that introduced them. A real user prompt *is* a boundary and stops
+    the search, so nothing merges across actual conversation.
+    """
+    for t in reversed(turns):
+        if t.kind == "assistant":
+            return t
+        if t.kind == "attachment" or (t.kind == "user" and t.meta):
+            continue
+        return None
+    return None
+
+
 def build_turns(records):
     """Convert raw records into an ordered turn list, folding tool results into calls."""
     turns = []
@@ -510,7 +533,7 @@ def build_turns(records):
             idx += 1
             turns.append(Turn(idx, "user", rec))
         elif rtype == "assistant" and isinstance(msg, dict):
-            prev = turns[-1] if turns else None
+            prev = open_assistant_turn(turns)
             if (
                 prev is not None
                 and prev.kind == "assistant"
@@ -527,7 +550,7 @@ def build_turns(records):
             if sub == "local_command":
                 idx += 1
                 turns.append(Turn(idx, "command", rec))
-            elif sub in ("api_error", "away_summary"):
+            elif sub in ("api_error", "away_summary", "compact_boundary"):
                 idx += 1
                 turns.append(Turn(idx, "system", rec))
         elif rtype == "attachment":
@@ -552,6 +575,17 @@ def is_real_prompt(rec):
     return True
 
 
+def chain_parent(rec):
+    """The record's parent in the conversation tree.
+
+    A `compact_boundary` resets `parentUuid` to null and records the
+    pre-compaction record in `logicalParentUuid`. Following that keeps the chain
+    connected across a compaction, so a rewind before the boundary is still
+    measured against a live branch that reaches it.
+    """
+    return rec.get("parentUuid") or rec.get("logicalParentUuid")
+
+
 def mark_abandoned(records, turns):
     """Flag turns that sit on a rewound/abandoned conversation branch.
 
@@ -563,8 +597,9 @@ def mark_abandoned(records, turns):
     by_uuid = {r["uuid"]: r for r in records if r.get("uuid")}
     children = {}
     for r in records:
-        if r.get("uuid") and r.get("parentUuid"):
-            children.setdefault(r["parentUuid"], []).append(r["uuid"])
+        parent = chain_parent(r)
+        if r.get("uuid") and parent:
+            children.setdefault(parent, []).append(r["uuid"])
 
     forks = [
         kids for parent, kids in children.items()
@@ -579,7 +614,7 @@ def mark_abandoned(records, turns):
     cur = leaf
     while cur and cur in by_uuid and cur not in live:
         live.add(cur)
-        cur = by_uuid[cur].get("parentUuid")
+        cur = chain_parent(by_uuid[cur])
 
     # Any subtree hanging off a fork that the live chain never enters is dead.
     dead = set()
@@ -687,11 +722,36 @@ def turn_text(turn, results, opts):
         return header + "\n" + "\n".join(body)
 
     if turn.kind == "command":
-        cmd = slash_command(rec.get("content", "")) or oneline(rec.get("content", ""), 120)
-        return f"## [{turn.idx}] LOCAL COMMAND · {fmt_ts(turn.ts)}{tag}\n  /{cmd.lstrip('/')}"
+        raw = rec.get("content", "")
+        cmd = slash_command(raw)
+        if cmd:
+            return f"## [{turn.idx}] LOCAL COMMAND · {fmt_ts(turn.ts)}{tag}\n  /{cmd.lstrip('/')}"
+        # A local_command record is usually just a <local-command-stdout> envelope
+        # with no <command-name>; render the payload, never the wrapper.
+        out = command_stdout(raw)
+        if out is not None:
+            return (
+                f"## [{turn.idx}] COMMAND OUTPUT · {fmt_ts(turn.ts)}{tag}\n"
+                + clip(out, 0 if opts.full else 10, indent="  ")
+            )
+        return f"## [{turn.idx}] LOCAL COMMAND · {fmt_ts(turn.ts)}{tag}\n" + clip(
+            raw, 0 if opts.full else 10, indent="  "
+        )
 
     if turn.kind == "system":
         sub = rec.get("subtype")
+        if sub == "compact_boundary":
+            cm = rec.get("compactMetadata") or {}
+            bits = []
+            if cm.get("trigger"):
+                bits.append(str(cm["trigger"]))
+            if cm.get("preTokens") is not None or cm.get("postTokens") is not None:
+                bits.append(f"{cm.get('preTokens', '?')} -> {cm.get('postTokens', '?')} tokens")
+            detail = f" ({', '.join(bits)})" if bits else ""
+            return (
+                f"## [{turn.idx}] CONTEXT COMPACTED · {fmt_ts(turn.ts)}{detail}{tag}\n"
+                "  turns above here were summarized out of the model's context"
+            )
         text = rec.get("content") or rec.get("error") or json.dumps(
             {k: v for k, v in rec.items() if k not in ("uuid", "parentUuid", "sessionId")},
             ensure_ascii=False, default=str,
@@ -751,7 +811,21 @@ def turn_summary(turn):
         return f"{flag}[{turn.idx:>4}] {fmt_ts(turn.ts)} ASST   " + " ".join(parts)
 
     if turn.kind == "command":
-        return f"{flag}[{turn.idx:>4}] {fmt_ts(turn.ts)} CMD    /{oneline(slash_command(rec.get('content', '')) or '', 90).lstrip('/')}"
+        raw = rec.get("content", "")
+        cmd = slash_command(raw)
+        if cmd:
+            return f"{flag}[{turn.idx:>4}] {fmt_ts(turn.ts)} CMD    /{oneline(cmd, 90).lstrip('/')}"
+        out = command_stdout(raw)
+        if out is not None:
+            return f"{flag}[{turn.idx:>4}] {fmt_ts(turn.ts)} CMDOUT {oneline(out, 110)}"
+        return f"{flag}[{turn.idx:>4}] {fmt_ts(turn.ts)} CMD    {oneline(raw, 110)}"
+
+    if turn.kind == "system" and rec.get("subtype") == "compact_boundary":
+        cm = rec.get("compactMetadata") or {}
+        return (
+            f"{flag}[{turn.idx:>4}] {fmt_ts(turn.ts)} COMPCT context compacted "
+            f"({cm.get('trigger', '?')}, {cm.get('preTokens', '?')} -> {cm.get('postTokens', '?')} tokens)"
+        )
 
     return f"{flag}[{turn.idx:>4}] {fmt_ts(turn.ts)} {turn.kind.upper()[:6]:<6} {oneline(json.dumps(rec.get('attachment') or rec.get('content') or '', default=str), 90)}"
 

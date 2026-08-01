@@ -32,13 +32,13 @@ One JSON object per line, appended in chronological order. Common fields: `type`
 |---|---|
 | `user` | a user prompt **or** a tool result — distinguish by content, see below |
 | `assistant` | one content block of an assistant response |
-| `system` | harness events; `subtype` is `local_command`, `turn_duration`, `away_summary`, `bridge_status`, `api_error` |
-| `attachment` | injected context; `attachment.type` is `hook_success`, `task_reminder`, `queued_command`, `skill_listing`, `plan_mode_exit`, … |
+| `system` | harness events; `subtype` is `local_command`, `turn_duration`, `away_summary`, `bridge_status`, `api_error`, `compact_boundary`, `scheduled_task_fire`, `informational`, `model_refusal_fallback` |
+| `attachment` | injected context; `attachment.type` is `hook_success`, `task_reminder`, `queued_command`, `skill_listing`, `plan_mode_exit`, `read_truncation_notice`, `nested_memory`, `deferred_tools_delta`, … |
 | `ai-title` | generated session title (`aiTitle`) |
 | `last-prompt` | most recent prompt plus `leafUuid` |
 | `file-history-snapshot`, `file-history-delta` | file backup bookkeeping |
 | `queue-operation` | messages queued while the turn was busy |
-| `mode`, `permission-mode`, `bridge-session`, `agent-color`, `pr-link` | session state |
+| `mode`, `permission-mode`, `bridge-session`, `agent-color`, `agent-name`, `pr-link` | session state |
 
 Only `user`, `assistant`, and some `system` / `attachment` records carry conversation.
 
@@ -47,7 +47,13 @@ Only `user`, `assistant`, and some `system` / `attachment` records carry convers
 **An assistant response is split across several records.** Each carries one content block
 (`thinking`, `text`, or `tool_use`) and they all share `message.id`. Rendering one record
 per turn triples the apparent turn count and separates a tool call from the sentence
-introducing it. Merge consecutive `assistant` records by `message.id`.
+introducing it. Merge `assistant` records by `message.id`.
+
+Merge by id rather than by adjacency, because the records are not always consecutive.
+A `tool_result` lands between two `tool_use` blocks whenever tools run in sequence, and
+harness bookkeeping interleaves too — a `read_truncation_notice` attachment, or an
+`isMeta` user record such as an image-rescaling notice. None of those end the response.
+An actual user prompt does, so treat only that as a boundary.
 
 **A `user` record is often not from the user.** If `message.content` is a list containing
 a `tool_result` block, the record is a tool result and belongs under the assistant turn
@@ -83,6 +89,21 @@ A genuine rewind — the user edited an earlier message and re-ran — shows up 
 user prompts sharing one `parentUuid`**, where "real" excludes tool results and `isMeta`
 records. The live branch is the one the file's last record descends from via `parentUuid`;
 sibling subtrees at that fork are abandoned. Both branches stay in the file.
+
+One record breaks the chain: a `compact_boundary` has `parentUuid: null` and puts the
+pre-compaction record in **`logicalParentUuid`** instead. Walk that when `parentUuid` is
+absent, or the live branch appears to start at the compaction and everything before it
+looks abandoned.
+
+## Compaction
+
+`{"type": "system", "subtype": "compact_boundary"}` marks where the conversation was
+summarized to free context. `compactMetadata` carries `trigger` (`auto` or `manual`),
+`preTokens`, `postTokens`, and `durationMs`.
+
+It matters for reading, not just parsing: records above the boundary were **not** in the
+model's context afterwards. Drop the marker and a transcript reads as one continuous
+conversation in which the model inexplicably forgets what it just did.
 
 ## Other notes
 
