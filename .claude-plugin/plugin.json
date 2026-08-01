@@ -1,6 +1,6 @@
 {
   "name": "session-transcripts",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Read, search and summarize transcripts of past Claude Code sessions stored as JSONL under ~/.claude/projects",
   "author": {
     "name": "Aniket Chadalavada",
