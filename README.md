@@ -36,6 +36,8 @@ Nothing to install for the script itself. Python 3, no dependencies:
 python3 skills/session-transcripts/scripts/transcript.py list --all --since 7d
 ```
 
+On Windows, invoke it with `py -3` rather than `python3`.
+
 ## Human Use
 
 `list` finds the session. `outline` prints one line per turn. `show --range`

@@ -194,13 +194,28 @@ def encode_cwd(path) -> str:
     return re.sub(r"[^a-zA-Z0-9]", "-", str(path))
 
 
+def looks_like_path(value) -> bool:
+    """True if this is a filesystem path rather than an already-encoded dir name.
+
+    Encoded names are alphanumerics and dashes only, so any separator gives a
+    path away. Testing for "/" alone missed native Windows paths — C:\\Users\\me
+    has none — and sent them down the substring-match branch, where they matched
+    nothing at all. The drive-letter test is deliberately not gated on the host
+    platform: transcripts get copied between machines, so a Windows path may
+    well be handed to a POSIX box.
+    """
+    text = str(value)
+    seps = {"/", os.sep, os.altsep} - {None}
+    return any(sep in text for sep in seps) or bool(re.match(r"^[a-zA-Z]:", text))
+
+
 def all_session_files(project=None):
     """Yield .jsonl transcript paths, optionally restricted to one project dir."""
     if not PROJECTS_DIR.is_dir():
         return
     dirs = sorted(d for d in PROJECTS_DIR.iterdir() if d.is_dir())
     if project:
-        wanted = encode_cwd(project) if ("/" in str(project) or Path(project).exists()) else str(project)
+        wanted = encode_cwd(project) if (looks_like_path(project) or Path(project).exists()) else str(project)
         dirs = [d for d in dirs if d.name == wanted or wanted in d.name]
     for d in dirs:
         yield from sorted(d.glob("*.jsonl"))
@@ -1188,7 +1203,31 @@ def add_select_flags(p):
     p.add_argument("--context", "-C", type=int, default=2, help="turns of context around --grep hits")
 
 
+def force_utf8_output():
+    """Emit UTF-8 whatever the platform's default encoding is.
+
+    Rendered output uses ▶, ⤷, ·, — and …. On Windows the default encoding is
+    the ANSI code page (cp1252 on a Western install) whenever stdout is a pipe
+    rather than a console — which is exactly how a tool harness reads it. Two
+    different failures follow from that, and the quiet one is the worse of the
+    pair: `show` dies outright on ▶ (U+25B6, absent from cp1252), while
+    `outline` and `list` exit 0 having written bytes no UTF-8 reader can decode.
+
+    Python 3.15 makes UTF-8 the default and this becomes a no-op. Until then it
+    is the difference between working and not on every Windows host.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:  # already replaced, e.g. by a test harness
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):  # detached or otherwise not reconfigurable
+            pass
+
+
 def main():
+    force_utf8_output()
     ap = argparse.ArgumentParser(
         prog="transcript.py",
         description="Read Claude Code session transcripts as readable text.",

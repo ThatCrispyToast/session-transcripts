@@ -23,6 +23,8 @@ import io
 import json
 import os
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 from argparse import Namespace
@@ -808,6 +810,76 @@ class TestTriageFlags(unittest.TestCase):
                 path = c.write(tmp)
                 turns, _ = T.build_turns(list(T.iter_records(path)))
                 self.assertEqual(T.read_meta(path).rewound, T.has_branches(turns))
+
+
+class TestCrossPlatform(unittest.TestCase):
+    """Windows behaviour, reproduced on any host.
+
+    Found by running the real python.org Windows build under Wine: `show` died
+    with UnicodeEncodeError on U+25B6, `outline` exited 0 while emitting
+    undecodable cp1252, and `--project 'C:\\Users\\me\\proj'` matched nothing.
+    None of the three needs Windows to test — the first two only need a legacy
+    code page, the third only a backslash.
+    """
+
+    def _project(self, tmp, cwd):
+        """A one-turn session, filed under the encoded form of `cwd`."""
+        project_dir = Path(tmp) / T.encode_cwd(cwd)
+        project_dir.mkdir()
+        c = Convo()
+        c.user("do the thing", cwd=cwd)
+        c.assistant_block("msg_A", text_block("on it"))
+        c.assistant_block("msg_A", tool_block("Bash", "t1", {"command": "ls"}))
+        c.tool_result("t1", "a\nb", tool_use_result={"stdout": "a\nb", "stderr": ""})
+        return c.write(project_dir)
+
+    def test_windows_paths_are_recognised_as_paths(self):
+        self.assertTrue(T.looks_like_path(r"C:\Users\me\proj"))
+        self.assertTrue(T.looks_like_path("C:/Users/me/proj"))
+        self.assertTrue(T.looks_like_path("/home/u/proj"))
+        # an already-encoded directory name is not a path and must not be re-encoded
+        self.assertFalse(T.looks_like_path("-home-u-proj"))
+        self.assertFalse(T.looks_like_path("C--Users-me-proj"))
+
+    def test_project_lookup_accepts_a_native_windows_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._project(tmp, r"C:\Users\me\proj")
+            old = T.PROJECTS_DIR
+            try:
+                T.PROJECTS_DIR = Path(tmp)
+                for form in (r"C:\Users\me\proj", "C:/Users/me/proj", "C--Users-me-proj"):
+                    with self.subTest(form=form):
+                        self.assertEqual(len(list(T.all_session_files(form))), 1)
+            finally:
+                T.PROJECTS_DIR = old
+
+    def test_output_is_utf8_under_a_legacy_code_page(self):
+        """The Windows failure, reproduced by forcing the encoding it defaults to.
+
+        Must run out of process: the point is what the interpreter does to a
+        real stdout, which an in-process StringIO cannot show.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            self._project(tmp, "/proj")
+            env = dict(os.environ,
+                       PYTHONIOENCODING="cp1252",
+                       CLAUDE_PROJECTS_DIR=tmp)
+            env.pop("CLAUDE_CODE_SESSION_ID", None)
+            env.pop("CLAUDE_SESSION_ID", None)
+            for cmd in (["show", "11111111"], ["outline", "11111111"], ["list", "--all"]):
+                with self.subTest(cmd=cmd[0]):
+                    proc = subprocess.run(
+                        [sys.executable, str(_SCRIPT), *cmd],
+                        capture_output=True, env=env,
+                    )
+                    self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
+                    proc.stdout.decode("utf-8")  # raises if the fix regressed
+            # and the glyph that used to crash it is really being exercised
+            proc = subprocess.run(
+                [sys.executable, str(_SCRIPT), "show", "11111111"],
+                capture_output=True, env=env,
+            )
+            self.assertIn("▶", proc.stdout.decode("utf-8"))
 
 
 class TestRealTranscripts(unittest.TestCase):

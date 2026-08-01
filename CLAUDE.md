@@ -106,6 +106,18 @@ These were each found by breaking them. Regressions here are silent, not loud.
   of the turn.
 - **Tool results fold under their call** via `tool_use_id` → `tool_use.id`, not by
   document order.
+- **`main` forces UTF-8 on stdout.** The rendered glyphs `▶` and `⤷` do not exist
+  in cp1252, which is what Windows Python encodes to whenever stdout is a pipe
+  rather than a console — precisely how a tool harness reads it. Dropping
+  `force_utf8_output` breaks Windows two ways, and the quiet one is worse:
+  `show` dies on `▶`, while `outline` and `list` exit 0 having written bytes no
+  UTF-8 reader can decode. An interactive Windows console hides both, because
+  Python writes UTF-8 there.
+- **Nothing may assume `/` is the separator.** `C:\Users\me\proj` contains no
+  forward slash, so the old `"/" in project` test sent native Windows paths to
+  the substring-match branch, where they matched nothing. `looks_like_path` is
+  the test; it stays platform-independent, since transcripts get copied between
+  machines.
 
 ## Testing
 
@@ -144,6 +156,37 @@ than trusting exit status — merged multi-block turns, a rewound session, an
 **sidechains cannot be eyeballed here**: all 63,250 `isSidechain` values in this
 corpus are `false`, so the `[subagent]` tag and `--no-sidechains` have no local
 coverage beyond not crashing.
+
+### Checking Windows behaviour from a Linux box
+
+`TestCrossPlatform` reproduces the Windows failures anywhere, by forcing the code
+page rather than the platform — but it only covers the failures already known
+about. To exercise the genuine article, run the real python.org build under Wine.
+No Windows licence, no VM, no system change:
+
+```bash
+cd "$(mktemp -d)"                    # keep the download out of the repo
+curl -sLO https://www.python.org/ftp/python/3.13.1/python-3.13.1-embed-amd64.zip
+python3 -c "import zipfile;zipfile.ZipFile('python-3.13.1-embed-amd64.zip').extractall('winpy')"
+export WINEPREFIX=$PWD/wineprefix WINEDEBUG=-all
+WINPY=$PWD/winpy/python.exe
+cd -                                 # back to the repo
+nix shell nixpkgs#wine64 --command wine "$WINPY" "$(pwd)/tests/test_transcript.py"
+```
+
+Pass the test file as an absolute Unix path: Wine hands argv through untranslated,
+and a leading `/` resolves against the current drive, which is the `Z:` mapping of
+`/`. A relative path works too; a `~` does not.
+
+That reports `sys.platform: win32` and `cp1252`, which is the whole point — the
+encoding bugs live in CPython's own `GetACP` path, so this finds them for real.
+`TestRealTranscripts` skips there (Wine's `C:\users\…` has no `.claude`), so it
+runs 5 tests fewer than on Linux; that is expected, not drift.
+
+Wine cannot settle two things: whether the Microsoft Store `python3.exe` alias
+stub intercepts the command, and how Claude Code's own Windows build encodes
+project directory names. The second is the one that would actually matter, and it
+needs Claude Code installed and signed in on Windows to answer.
 
 ### Trialling the skill against real models
 

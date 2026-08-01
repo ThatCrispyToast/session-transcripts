@@ -24,6 +24,10 @@ python3 "$T" --help
 as `python3: can't open file '/scripts/transcript.py'`, which is easy to misread as the
 skill being broken.
 
+**On Windows use `py -3 "$T"`**, not `python3`. The official installer ships `python.exe`
+and the `py` launcher but no `python3`; that name normally resolves to a Microsoft Store
+stub that opens the Store instead of running anything.
+
 ## Work from wide to narrow
 
 Transcripts are big — a long session is ~2 MB of JSONL. Never dump a whole one into
