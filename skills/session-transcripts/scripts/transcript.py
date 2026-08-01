@@ -29,6 +29,22 @@ PROJECTS_DIR = Path(
     os.environ.get("CLAUDE_PROJECTS_DIR", Path.home() / ".claude" / "projects")
 )
 
+# The session doing the searching. Its transcript already contains the question
+# being asked, so it matches almost any query and — being the newest file — sorts
+# to the top of every result list. Hidden by default; --include-current brings it
+# back. Naming a session explicitly always works regardless.
+CURRENT_SESSION_ID = (
+    os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CLAUDE_SESSION_ID") or ""
+)
+
+# Payload keys whose values are identifiers or crypto blobs, not content. A
+# `thinking` block's base64 `signature` is long enough to match many patterns by
+# accident, which puts nonsense in search output.
+NON_CONTENT_KEYS = {
+    "signature", "uuid", "parentUuid", "logicalParentUuid", "leafUuid",
+    "sessionId", "requestId", "id", "tool_use_id",
+}
+
 # Record types that carry no conversational meaning.
 NOISE_TYPES = {
     "file-history-snapshot",
@@ -196,6 +212,7 @@ class Meta:
     __slots__ = (
         "path", "session_id", "cwd", "branch", "title", "slug", "first_prompt",
         "start", "end", "n_user", "n_assistant", "n_tools", "models", "versions", "tools",
+        "rewound", "compacted",
     )
 
     def __init__(self, path):
@@ -214,13 +231,26 @@ class Meta:
         self.models = set()
         self.versions = set()
         self.tools = {}
+        self.rewound = False
+        self.compacted = False
 
 
 def read_meta(path: Path) -> Meta:
     m = Meta(path)
     last_assistant_id = None
+    prompt_parents = {}  # parent uuid -> real user prompts hanging off it
     for rec in iter_records(path):
         rtype = rec.get("type")
+        # Same strict rule as mark_abandoned: two real prompts under one parent.
+        # Surfaced here so `list` can flag it during triage, before any turn is read.
+        if is_real_prompt(rec):
+            parent = chain_parent(rec)
+            if parent:
+                prompt_parents[parent] = prompt_parents.get(parent, 0) + 1
+                if prompt_parents[parent] > 1:
+                    m.rewound = True
+        if rtype == "system" and rec.get("subtype") == "compact_boundary":
+            m.compacted = True
         if rec.get("sessionId"):
             m.session_id = rec["sessionId"]
         if rec.get("cwd") and not m.cwd:
@@ -857,6 +887,11 @@ def session_header(meta, turns, opts):
             f"Note:     session was rewound; {n} turns are on abandoned branches "
             f"(marked '[abandoned branch]'; hide with --main-branch)"
         )
+    if meta.compacted:
+        lines.append(
+            "Note:     session was compacted; turns above a 'CONTEXT COMPACTED' marker "
+            "were summarized out of the model's context"
+        )
     mode = []
     if not opts.thinking:
         mode.append("thinking hidden")
@@ -894,8 +929,7 @@ def select_range(turns, opts):
         pat = re.compile(opts.grep, re.I)
         keep = set()
         for i, t in enumerate(turns):
-            blob = json.dumps(t.payload, default=str)
-            if pat.search(blob):
+            if pat.search(turn_blob(t.payload)):
                 for j in range(max(0, i - opts.context), min(len(turns), i + opts.context + 1)):
                     keep.add(j)
         turns = [t for i, t in enumerate(turns) if i in keep]
@@ -905,6 +939,22 @@ def select_range(turns, opts):
 # --------------------------------------------------------------------------
 # commands
 # --------------------------------------------------------------------------
+
+
+def drop_current(files, opts):
+    """Remove the calling session's own transcript. Returns (files, dropped)."""
+    if getattr(opts, "include_current", False) or not CURRENT_SESSION_ID:
+        return files, 0
+    kept = [f for f in files if f.stem != CURRENT_SESSION_ID]
+    return kept, len(files) - len(kept)
+
+
+def note_dropped(dropped):
+    if dropped:
+        print(
+            f"(hid the current session, {CURRENT_SESSION_ID[:8]}; --include-current shows it)",
+            file=sys.stderr,
+        )
 
 
 def cmd_projects(opts):
@@ -935,7 +985,7 @@ def cmd_projects(opts):
 
 def cmd_list(opts):
     project = None if opts.all else (opts.project or os.getcwd())
-    files = list(all_session_files(project))
+    files, dropped = drop_current(list(all_session_files(project)), opts)
     if not files and not opts.all:
         print(f"no transcripts for project {project}", file=sys.stderr)
         print("(try --all, or: transcript.py projects)", file=sys.stderr)
@@ -964,7 +1014,10 @@ def cmd_list(opts):
     for m in metas:
         when = fmt_ts(m.end, True)
         dur = fmt_duration((m.end - m.start).total_seconds()) if m.start and m.end else "?"
-        print(f"{m.session_id}  {when}  {dur:>7}  {m.n_user}u/{m.n_assistant}a/{m.n_tools}t")
+        # Flag the two things that change how the transcript should be read, so
+        # they are visible during triage rather than only after opening a session.
+        marks = ("  [rewound]" if m.rewound else "") + ("  [compacted]" if m.compacted else "")
+        print(f"{m.session_id}  {when}  {dur:>7}  {m.n_user}u/{m.n_assistant}a/{m.n_tools}t{marks}")
         print(f"  title: {m.title or '(none)'}")
         if opts.all or opts.project is None:
             print(f"  cwd:   {m.cwd or '?'}")
@@ -972,6 +1025,7 @@ def cmd_list(opts):
             print(f"  first: {m.first_prompt}")
         print()
     sys.stdout.flush()
+    note_dropped(dropped)
     print(f"{len(metas)} sessions. Next: transcript.py outline <session-id>", file=sys.stderr)
 
 
@@ -1023,9 +1077,10 @@ def cmd_show(opts):
 def cmd_search(opts):
     pat = re.compile(opts.pattern, 0 if opts.case_sensitive else re.I)
     project = None if opts.all else (opts.project or os.getcwd())
-    files = list(all_session_files(project))
+    files, dropped = drop_current(list(all_session_files(project)), opts)
     if not files:
         die(f"no transcripts for {project} (try --all)")
+    note_dropped(dropped)
 
     cutoff = parse_since(opts.since) if opts.since else None
     hits = 0
@@ -1039,9 +1094,7 @@ def cmd_search(opts):
             continue
         local = []
         for t in turns:
-            blob = turn_summary(t)
-            full_blob = json.dumps(t.payload, default=str)
-            if pat.search(full_blob) or pat.search(blob):
+            if pat.search(turn_blob(t.payload)) or pat.search(turn_summary(t)):
                 local.append(t)
                 if len(local) >= opts.max_per_session:
                     break
@@ -1049,7 +1102,10 @@ def cmd_search(opts):
             continue
         sessions_hit += 1
         meta = read_meta(path)
-        print(f"\n=== {meta.session_id}  {fmt_ts(meta.end, True)}  {meta.cwd or ''}")
+        # search is the usual entry point, so the triage flags have to appear here
+        # too - a reader who goes straight from search to outline never sees `list`.
+        marks = ("  [rewound]" if meta.rewound else "") + ("  [compacted]" if meta.compacted else "")
+        print(f"\n=== {meta.session_id}  {fmt_ts(meta.end, True)}  {meta.cwd or ''}{marks}")
         print(f"    {meta.title or meta.first_prompt or ''}")
         for t in local:
             hits += 1
@@ -1069,28 +1125,39 @@ def cmd_search(opts):
     )
 
 
-def matching_lines(turn, pat, context):
-    """Pull the actual matching text lines out of a turn payload."""
-    out = []
-    blob = json.dumps(turn.payload, ensure_ascii=False, default=str)
-    try:
-        text = json.loads(blob)
-    except json.JSONDecodeError:
-        text = {}
+def content_strings(payload):
+    """Every string in a record that is actual content, skipping identifiers.
+
+    Searching the raw JSON matches base64 `thinking` signatures and uuids, which
+    both produces false hits and prints unreadable blobs as if they were matching
+    lines.
+    """
     haystack = []
 
     def walk(node):
         if isinstance(node, str):
             haystack.append(node)
         elif isinstance(node, dict):
-            for v in node.values():
-                walk(v)
+            for k, v in node.items():
+                if k not in NON_CONTENT_KEYS:
+                    walk(v)
         elif isinstance(node, list):
             for v in node:
                 walk(v)
 
-    walk(text)
-    for chunk in haystack:
+    walk(payload)
+    return haystack
+
+
+def turn_blob(payload):
+    """One searchable string per turn, identifiers excluded."""
+    return "\n".join(content_strings(payload))
+
+
+def matching_lines(turn, pat, context):
+    """Pull the actual matching text lines out of a turn payload."""
+    out = []
+    for chunk in content_strings(turn.payload):
         for line in chunk.split("\n"):
             if pat.search(line):
                 out.append(oneline(line, 160))
@@ -1138,6 +1205,8 @@ def main():
     p.add_argument("--since", help="7d, 24h, 2w or YYYY-MM-DD")
     p.add_argument("--grep", help="filter on title / first prompt / id")
     p.add_argument("--include-empty", action="store_true")
+    p.add_argument("--include-current", action="store_true",
+                   help="include the session you are running in (hidden by default)")
     p.set_defaults(func=cmd_list)
 
     p = sub.add_parser("outline", help="one line per turn - read this before show")
@@ -1161,6 +1230,8 @@ def main():
     p.add_argument("--limit", type=int, default=10, help="max sessions to report")
     p.add_argument("--max-per-session", type=int, default=5)
     p.add_argument("--render", action="store_true", help="render full turns instead of one-liners")
+    p.add_argument("--include-current", action="store_true",
+                   help="include the session you are running in (hidden by default)")
     add_render_flags(p)
     p.set_defaults(func=cmd_search, range=None, last=None, grep=None)
 
@@ -1169,6 +1240,7 @@ def main():
         ("full", False), ("thinking", False), ("meta", False), ("max_lines", 20),
         ("main_branch", False), ("sidechains", True), ("project", None),
         ("range", None), ("last", None), ("grep", None), ("context", 2),
+        ("include_current", False),
     ):
         if not hasattr(opts, name):
             setattr(opts, name, default)
