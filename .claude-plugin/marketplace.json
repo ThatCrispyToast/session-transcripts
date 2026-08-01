@@ -9,7 +9,7 @@
     {
       "name": "session-transcripts",
       "source": "./",
-      "version": "1.0.0",
+      "version": "1.2.0",
       "description": "Read, search and summarize transcripts of past Claude Code sessions stored as JSONL under ~/.claude/projects"
     }
   ]
