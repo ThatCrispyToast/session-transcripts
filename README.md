@@ -80,6 +80,11 @@ Two commands sit outside the main flow: `projects` lists every directory that ha
 transcripts, and `search` runs a regex across them (`--all` to leave the current
 project).
 
+`list` and `search` tag a session `[rewound]` or `[compacted]` when its history
+needs care, and both hide the session you are running in - it contains whatever
+you just asked, so it matches nearly every query and sorts first. `--include-current`
+turns that off.
+
 ## Transcript Format
 
 One JSON object per line. `type` says what it is: `user`, `assistant`, `system`,
@@ -101,8 +106,10 @@ anything else.
 `parentUuid` reads like a linked list and behaves like a tree, where a node with
 several children is completely ordinary: the text block above and the
 `tool_result` answering its Bash call both point at the same parent. Treat any
-fork as a rewind and 27 of ~400 transcripts here look rewound. The true count is
-2.
+fork as a rewind and 335 of the 546 transcripts on this machine look rewound. The
+true count is 8. That gap widens with every release - the same loose rule flags
+36% of transcripts written by Claude Code 2.1.140 and 74% of those written by
+2.1.220.
 
 A rewind is two user prompts under one parent, and `type: "user"` alone doesn't
 identify a prompt - tool results arrive under that type, as does injected context
@@ -112,6 +119,12 @@ Both halves of a rewind stay on disk. The outline marks the abandoned side with
 `!` rather than hiding it; `--main-branch` hides it when you want the
 conversation as it finally stood.
 
+A long session may also have been compacted, which is a different kind of seam: a
+`compact_boundary` record marks where the history above it was summarized out of
+the model's context. It renders as `CONTEXT COMPACTED`, with the token count
+before and after. Without it a transcript reads as one continuous conversation in
+which the model abruptly forgets what it just did.
+
 [`format.md`](skills/session-transcripts/reference/format.md) has the rest: record types,
 the `toolUseResult` shapes per tool, and the lossy cwd encoding.
 
@@ -120,9 +133,10 @@ the `toolUseResult` shapes per tool, and the lossy cwd encoding.
 | Path | What |
 |---|---|
 | `skills/session-transcripts/SKILL.md` | the skill: frontmatter triggers, then the workflow |
-| `skills/session-transcripts/scripts/transcript.py` | the renderer, ~1100 lines of stdlib Python |
+| `skills/session-transcripts/scripts/transcript.py` | the renderer, ~1200 lines of stdlib Python |
 | `skills/session-transcripts/reference/format.md` | the JSONL schema |
 | `.claude-plugin/` | manifests, so `/plugin marketplace add` works |
+| `tests/` | `python3 -m unittest discover -s tests` |
 
 The repo is the plugin; the skill sits under `skills/` where Claude Code finds it
 by convention. Room for a second one later.

@@ -11,11 +11,13 @@ Three files carry everything, all under `skills/session-transcripts/`:
 | Path | Role |
 |---|---|
 | `SKILL.md` | frontmatter (`name`, `description`, `allowed-tools`) plus the workflow the model follows. The `description` is the trigger — edit it only with intent. |
-| `scripts/transcript.py` | the whole implementation, ~1100 lines, single file |
+| `scripts/transcript.py` | the whole implementation, ~1200 lines, single file |
 | `reference/format.md` | the JSONL schema; progressive disclosure, loaded only for raw-record work |
 
 At the repo root, `.claude-plugin/` holds `plugin.json` + `marketplace.json` and
-makes the repo installable via `/plugin marketplace add`.
+makes the repo installable via `/plugin marketplace add`, and `tests/` holds the
+suite. Both sit outside `skills/` on purpose: the skill directory is what gets
+symlinked in the dev workflow, and it should contain only what the skill loads.
 
 The repo is the plugin, and Claude Code auto-discovers `skills/*/SKILL.md` inside
 it — neither manifest names the skill, so adding a second one needs no manifest
@@ -52,8 +54,10 @@ Sections are marked by `# ---` banners, in pipeline order:
 3. **Tool rendering** — `render_tool_input`, `render_tool_result`. Prefer the
    `toolUseResult` field over the `tool_result` block; it is the richer,
    structured version.
-4. **Turn assembly** — `Turn`, `build_turns`, `is_real_prompt`, `mark_abandoned`.
-   This is where the two format traps live.
+4. **Turn assembly** — `Turn`, `build_turns`, `open_assistant_turn`, `is_real_prompt`,
+   `chain_parent`, `mark_abandoned`. This is where the two format traps live.
+   `open_assistant_turn` decides what may interrupt a response without ending it;
+   `chain_parent` keeps the parent chain connected across a compaction.
 5. **Output** — `turn_text`, `turn_summary`, `session_header`, `select_range`.
 6. **Commands** — `cmd_projects`, `cmd_list`, `cmd_outline`, `cmd_show`,
    `cmd_search`, then `main`. Shared flags come from `add_render_flags` /
@@ -66,12 +70,35 @@ These were each found by breaking them. Regressions here are silent, not loud.
 
 - **Merge assistant records by `message.id`.** One response is split across
   records, one per content block. One-record-per-turn separates a tool call from
-  the text introducing it and roughly doubles the turn count.
+  the text introducing it and roughly doubles the turn count. Merging must also
+  look *past* harness bookkeeping — a `read_truncation_notice` attachment or an
+  injected `isMeta` record can land mid-response — which is what
+  `open_assistant_turn` is for. It stops at a real user prompt, so nothing merges
+  across actual conversation.
 - **Rewind detection is strict.** A rewind is two *real* user prompts sharing one
   `parentUuid` — "real" excludes `tool_result` content and `isMeta` records. The
-  loose heuristic (any parent with multiple children) false-positives on ~7% of
-  transcripts. If you touch `mark_abandoned`, re-check both a true positive and a
-  known false positive.
+  loose heuristic (any parent with multiple children) false-positives on **61%**
+  of transcripts here and rising: broken down by Claude Code version it runs 36%
+  on 2.1.140 and 66–74% on 2.1.187 through 2.1.220, against 1.5% for the strict
+  rule. If you touch `mark_abandoned`, re-check both a true positive and a known
+  false positive.
+- **The calling session is excluded from `list` and `search`.** Its transcript
+  contains the question being asked, so it matches nearly any query, and being the
+  newest file it sorts first. In a four-model trial every single `search` spent
+  part of its top ten hits on it. `CURRENT_SESSION_ID` comes from
+  `CLAUDE_CODE_SESSION_ID`; `--include-current` opts back in.
+- **Triage flags belong in `list` *and* `search`.** `[rewound]` / `[compacted]`
+  originally went only into `list`, and the trials showed models routinely go
+  `search` → `outline` → `show` without ever running `list`. A signal on a path
+  nobody walks is not a signal.
+- **Search matches content, not identifiers.** `NON_CONTENT_KEYS` keeps base64
+  `thinking` signatures and uuids out of both the match test and the printed
+  lines; without it a short pattern hits base64 and prints blobs as if they were
+  matching text.
+- **Envelope wrappers never render as speech.** `<command-name>` and
+  `<local-command-stdout>` are containers, not content. Both the `user` path and
+  the `system`/`local_command` path have to strip them, in `turn_text` *and*
+  `turn_summary` — the leak that shipped only affected the latter pair.
 - **Turn numbers are stable across flags.** Numbering happens before filtering, so
   an `outline` and a later `show --range` always line up. Filtering must never
   renumber.
@@ -82,28 +109,76 @@ These were each found by breaking them. Regressions here are silent, not loud.
 
 ## Testing
 
-There is no test suite. Verification is a sweep over real transcripts — ~400 of
-them on this machine, which is the point: they cover format variation no fixture
-would.
+`tests/test_transcript.py` — stdlib `unittest`, no dependencies, same constraint
+as the script. It loads `transcript.py` by path, since the script is invoked
+rather than imported.
 
 ```bash
-# every transcript renders under every flag combination, no traceback
-python3 skills/session-transcripts/scripts/transcript.py list --all --limit 9999 --include-empty
+python3 -m unittest discover -s tests -v
+TRANSCRIPT_FULL_SWEEP=1 python3 -m unittest discover -s tests   # every transcript, not a sample
+```
 
+Two halves, and both matter. Most classes build **synthetic records** — a rewind,
+a compaction, a response split by a truncation notice are all too rare to find on
+demand in a real corpus, and a fixture states the shape exactly. `TestRealTranscripts`
+then sweeps **whatever is actually on the machine** (546 files here), which is what
+catches format drift no fixture anticipates; it skips cleanly on a machine with
+none, and samples ~40 files unless `TRANSCRIPT_FULL_SWEEP=1`.
+
+A test that cannot fail is worse than no test. After changing a fix, revert it and
+confirm the suite goes red — every fix currently in the file was checked that way.
+
+The sweep still has value by hand, since it exercises the real CLI end to end:
+
+```bash
 T=skills/session-transcripts/scripts/transcript.py
 for f in ~/.claude/projects/*/*.jsonl; do
   python3 "$T" outline "$f" >/dev/null || echo "FAIL outline $f"
-  python3 "$T" show "$f" --full --thinking --meta >/dev/null \
-    || echo "FAIL show $f"
+  python3 "$T" show "$f" --full --thinking --meta >/dev/null || echo "FAIL show $f"
 done
 ```
 
 After a rendering change, eyeball a session that exercises the hard cases rather
-than trusting exit status — merged multi-block turns, a rewound session, a
-sidechain, an `AskUserQuestion`, and a Bash call with both stdout and stderr.
+than trusting exit status — merged multi-block turns, a rewound session, an
+`AskUserQuestion`, and a Bash call with both stdout and stderr. Note that
+**sidechains cannot be eyeballed here**: all 63,250 `isSidechain` values in this
+corpus are `false`, so the `[subagent]` tag and `--no-sidechains` have no local
+coverage beyond not crashing.
+
+### Trialling the skill against real models
+
+Unit tests prove the renderer is correct; they say nothing about whether a model
+*uses* it well. That needs headless trials. The harness is a throwaway project dir
+with the skill symlinked into `.claude/skills/`, driven per model and captured as
+a full event log:
+
+```bash
+mkdir -p lab/.claude/skills && ln -s "$PWD/skills/session-transcripts" lab/.claude/skills/
+cd lab && printf '%s' "$PROMPT" | claude -p --model claude-sonnet-5 \
+  --output-format stream-json --verbose \
+  --allowedTools Bash Read Grep Glob Skill --disallowedTools Write Edit > run.jsonl
+```
+
+`stream-json` records every tool call, which is the ground truth — self-reported
+summaries are not. Pass the prompt on **stdin**: variadic flags like `--allowedTools`
+swallow a positional prompt and the run dies with "Input must be provided".
+
+Three things this caught that no unit test could: `$CLAUDE_SKILL_DIR` is not set
+(the documented invocation expanded to `/scripts/transcript.py` and one model
+answered by running `find /`), `search` was burying real hits under the caller's
+own session, and a flag added only to `list` never reached models that go straight
+from `search` to `outline`.
+
+Two cautions if you repeat it. Trial sessions land in `~/.claude/projects` and
+pollute the next round's corpus, so move that project dir aside between runs. And
+n=1 per model is noise: across three rounds the same model both caught and missed
+the same rewind. Treat these as instrumentation checks, not benchmarks — the
+finding is whether a signal is *reachable*, not which model scores best.
 
 Check the compression ratio when output format changes; it is the tool's reason
-for existing. Target roughly 170× for `outline` and 10× for `show`.
+for existing. Currently ~220× for `outline` and ~15× for `show` across a 25 MB
+sample; treat 170× / 10× as the floor. `TestRealTranscripts` asserts the outline
+floor automatically.
 
 ## Releasing
 
