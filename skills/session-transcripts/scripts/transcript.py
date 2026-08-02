@@ -225,7 +225,7 @@ class Meta:
     """Cheap summary of one transcript file."""
 
     __slots__ = (
-        "path", "session_id", "cwd", "branch", "title", "slug", "first_prompt",
+        "path", "session_id", "cwd", "branch", "title", "first_prompt",
         "start", "end", "n_user", "n_assistant", "n_tools", "models", "versions", "tools",
         "rewound", "compacted",
     )
@@ -236,7 +236,6 @@ class Meta:
         self.cwd = None
         self.branch = None
         self.title = None
-        self.slug = None
         self.first_prompt = None
         self.start = None
         self.end = None
@@ -272,8 +271,6 @@ def read_meta(path: Path) -> Meta:
             m.cwd = rec["cwd"]
         if rec.get("gitBranch"):
             m.branch = rec["gitBranch"]
-        if rec.get("slug") and not m.slug:
-            m.slug = rec["slug"]
         if rtype == "ai-title" and rec.get("aiTitle"):
             m.title = rec["aiTitle"]
         if rec.get("version"):
@@ -409,7 +406,7 @@ def render_tool_input(name, params, full):
         return "AskUserQuestion", clip("\n".join(rows), 0 if full else 20)
     if name == "ExitPlanMode":
         return "ExitPlanMode", clip(p.get("plan", ""), 0 if full else 20)
-    if name == "TaskCreate" or name == "TaskUpdate":
+    if name in ("TaskCreate", "TaskUpdate"):
         bits = {k: v for k, v in p.items() if k in ("task_id", "content", "status", "activeForm", "description")}
         return f"{name}: " + oneline(json.dumps(bits, ensure_ascii=False), 160), ""
 
@@ -1051,7 +1048,7 @@ def parse_since(text):
     if m:
         n = int(m.group(1))
         secs = {"h": 3600, "d": 86400, "w": 604800, "m": 2592000}[m.group(2)]
-        return now.fromtimestamp(now.timestamp() - n * secs, tz=timezone.utc)
+        return datetime.fromtimestamp(now.timestamp() - n * secs, tz=timezone.utc)
     dt = parse_ts(text) or parse_ts(text + "T00:00:00+00:00")
     if dt is None:
         die(f"cannot parse --since {text!r} (use 7d, 24h, 2w, or YYYY-MM-DD)")
@@ -1104,7 +1101,7 @@ def cmd_search(opts):
         if cutoff and datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc) < cutoff:
             continue
         try:
-            records, turns, results = load_session(path, opts)
+            _, turns, results = load_session(path, opts)
         except OSError:
             continue
         local = []
