@@ -78,12 +78,19 @@ same record holds a richer structured version, and is the better source:
 `tool_result.content` may itself be a list containing `text`, `image`, or `tool_reference`
 blocks (the last is how `ToolSearch` reports loaded tools).
 
+A tool result belongs to the assistant turn that called it, not to the `user` record it
+arrives on, and it is where most of a session lives: tool output is 89% of all content by
+volume. Anything reading a transcript by turn has to fold it in — for display *and* for
+search, or a stack trace sitting in a Bash result is invisible to a search for it. Results
+can also carry a base64 image on a single line; one in this corpus is 58 KB.
+
 ## Branching
 
 `parentUuid` forms a tree, not a chain. **A parent with several children is normal**: the
 next content block of an assistant response and the `tool_result` answering its tool call
-both hang off the same parent. Treating that as a fork produces false positives on roughly
-7% of transcripts.
+both hang off the same parent. Treating that as a fork produces false positives on 60% of
+transcripts — 375 of the 630 on the machine this was surveyed from, against 8 genuine
+rewinds.
 
 A genuine rewind — the user edited an earlier message and re-ran — shows up as **two real
 user prompts sharing one `parentUuid`**, where "real" excludes tool results and `isMeta`

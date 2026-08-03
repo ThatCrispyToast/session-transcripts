@@ -45,6 +45,13 @@ NON_CONTENT_KEYS = {
     "sessionId", "requestId", "id", "tool_use_id",
 }
 
+# The same problem one level up: a tool result can carry a base64 image — one in
+# this corpus is a 58 KB PNG on a single line. Searching it means short patterns
+# hit the alphabet soup and the blob prints as though it were matching text.
+# Length alone is the wrong test, since a dumped file is long and must stay
+# findable; the giveaway is length with no whitespace anywhere.
+BLOB_CHARS = 500
+
 # Record types that carry no conversational meaning.
 NOISE_TYPES = {
     "file-history-snapshot",
@@ -69,6 +76,14 @@ INTERESTING_ATTACHMENTS = {
 }
 
 MAX_LINE_CHARS = 400
+
+# Outline budget for the `{...}` tool list and for one tool's target inside it.
+# `{Edit}` does not say what was edited, and finding out used to mean rendering
+# the whole session. Priced over a 28.6 MB sample, naming the target costs 4.3%
+# of outline size (166x -> 159x); the cap keeps a turn with a dozen tool calls
+# from running away with the line.
+TOOLS_SECTION_CHARS = 72
+TARGET_CHARS = 24
 
 
 # --------------------------------------------------------------------------
@@ -245,7 +260,14 @@ def all_session_files(project=None):
     dirs = sorted(d for d in PROJECTS_DIR.iterdir() if d.is_dir())
     if project:
         wanted = encode_cwd(project) if (looks_like_path(project) or Path(project).exists()) else str(project)
-        dirs = [d for d in dirs if d.name == wanted or wanted in d.name]
+        # Substring is the fallback that makes a bare name (`rc-g2`) and a parent
+        # path (`~/Programs`) work, but as the primary rule it also swept in every
+        # scratchpad: /tmp/claude-<id>/<encoded-cwd>/.../scratchpad encodes to a
+        # directory name that *contains* the project's own. Three of the top five
+        # sessions listed for this repo were throwaway scratch sessions from a
+        # different working directory. Take an exact match when there is one.
+        exact = [d for d in dirs if d.name == wanted]
+        dirs = exact or [d for d in dirs if wanted in d.name]
     for d in dirs:
         yield from sorted(d.glob("*.jsonl"))
 
@@ -346,18 +368,46 @@ def read_meta(path: Path) -> Meta:
     return m
 
 
+def newest_session(project=None) -> Path:
+    """The most recent session, scoped like `list` and never the caller's own.
+
+    `latest` used to mean "newest file anywhere under PROJECTS_DIR", which on a
+    machine running several sessions at once resolved to the transcript of the
+    session doing the asking, or to an unrelated project that happened to be
+    busy. Both were observed live, minutes apart. `list` and `search` already
+    hide the calling session for the same reason; naming a session id explicitly
+    still reaches anything.
+    """
+    def newest(files):
+        files = [f for f in files if f.stem != CURRENT_SESSION_ID]
+        return max(files, key=lambda f: f.stat().st_mtime) if files else None
+
+    here = newest(all_session_files(project or os.getcwd()))
+    if here is not None:
+        return here
+    anywhere = newest(all_session_files())
+    if anywhere is None:
+        die("no transcripts found under " + str(PROJECTS_DIR))
+    print(
+        f"(no sessions for this project; 'latest' resolved to {anywhere.stem[:8]} "
+        f"in another project: {anywhere.parent.name})",
+        file=sys.stderr,
+    )
+    return anywhere
+
+
 def resolve_session(ref: str, project=None) -> Path:
     """Resolve a session reference: path, full/partial id, or 'latest'."""
     p = Path(ref).expanduser()
     if p.is_file():
         return p
 
+    if ref == "latest":
+        return newest_session(project)
+
     candidates = list(all_session_files(project))
     if not candidates:
         die("no transcripts found under " + str(PROJECTS_DIR))
-
-    if ref == "latest":
-        return max(candidates, key=lambda f: f.stat().st_mtime)
 
     exact = [f for f in candidates if f.stem == ref]
     if exact:
@@ -526,7 +576,7 @@ def render_tool_result(result, block, full, max_lines):
 class Turn:
     __slots__ = (
         "idx", "kind", "ts", "uuid", "parent", "sidechain", "meta", "payload",
-        "abandoned", "blocks", "msg_id", "uuids",
+        "abandoned", "blocks", "msg_id", "uuids", "results",
     )
 
     def __init__(self, idx, kind, rec):
@@ -540,6 +590,9 @@ class Turn:
         self.payload = rec
         self.abandoned = False
         self.uuids = {rec["uuid"]} if rec.get("uuid") else set()
+        # (toolUseResult, tool_result block) for each tool this turn called,
+        # attached by build_turns so the turn can be searched as a whole.
+        self.results = []
         msg = rec.get("message")
         self.msg_id = msg.get("id") if isinstance(msg, dict) else None
         # Assistant responses are written one content block per JSONL record,
@@ -629,6 +682,16 @@ def build_turns(records):
             if atype in INTERESTING_ATTACHMENTS:
                 idx += 1
                 turns.append(Turn(idx, "attachment", rec))
+
+    # Fold each result back onto the turn that called it. Rendering looks results
+    # up by id at print time; searching cannot, because it has to know what a turn
+    # contains before deciding whether to print it at all.
+    for t in turns:
+        for block in t.blocks:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                found = pending_results.get(block.get("id"))
+                if found is not None:
+                    t.results.append(found)
 
     mark_abandoned(records, turns)
     return turns, pending_results
@@ -838,6 +901,56 @@ def turn_text(turn, results, opts):
     return ""
 
 
+def tool_target(name, params):
+    """A short word for *what* a tool call acted on, or '' if there isn't one.
+
+    Bash is deliberately absent. It is 45% of all tool calls in this corpus, so
+    carrying its description costs 12 points of outline size on its own — 159x
+    down to 143x — against 4.3% for everything here put together, and `show`
+    already prints both its description and its command.
+    """
+    p = params if isinstance(params, dict) else {}
+    if name in ("Read", "Write", "Edit", "NotebookEdit"):
+        raw = p.get("file_path") or p.get("notebook_path") or ""
+        # not os.path.basename: a transcript written on Windows carries
+        # backslash paths, and this may well be read on a POSIX box
+        target = re.split(r"[\\/]", str(raw))[-1]
+    elif name in ("Grep", "Glob"):
+        target = str(p.get("pattern") or "")
+    elif name in ("Task", "Agent"):
+        target = str(p.get("description") or "")
+    elif name == "Skill":
+        target = str(p.get("skill") or "")
+    else:
+        target = ""
+    target = " ".join(target.split())
+    return target[:TARGET_CHARS]
+
+
+def tools_section(calls):
+    """Render the outline's `{...}` list from (name, target) pairs."""
+    order, targets, counts = [], {}, {}
+    for name, target in calls:
+        if name not in targets:
+            order.append(name)
+            targets[name] = []
+        counts[name] = counts.get(name, 0) + 1
+        if target and target not in targets[name]:
+            targets[name].append(target)
+    bits = []
+    for name in order:
+        seen = targets[name]
+        if seen:
+            more = f" +{len(seen) - 2}" if len(seen) > 2 else ""
+            bits.append(f"{name}: {', '.join(seen[:2])}{more}")
+        else:
+            bits.append(f"{name}x{counts[name]}" if counts[name] > 1 else name)
+    out = "{" + ", ".join(bits) + "}"
+    if len(out) > TOOLS_SECTION_CHARS:
+        out = out[: TOOLS_SECTION_CHARS - 1] + "…}"
+    return out
+
+
 def turn_summary(turn):
     """One-line summary of a turn, for outline mode."""
     rec = turn.payload
@@ -866,7 +979,8 @@ def turn_summary(turn):
             if block.get("type") == "text" and block.get("text", "").strip():
                 text_bits.append(block["text"])
             elif block.get("type") == "tool_use":
-                tools.append(block.get("name", "?"))
+                name = block.get("name", "?")
+                tools.append((name, tool_target(name, block.get("input"))))
             elif block.get("type") == "thinking" and (block.get("thinking") or "").strip():
                 think += 1
         parts = []
@@ -875,10 +989,7 @@ def turn_summary(turn):
         if text_bits:
             parts.append(oneline(" ".join(text_bits), 90))
         if tools:
-            counts = {}
-            for t in tools:
-                counts[t] = counts.get(t, 0) + 1
-            parts.append("{" + ", ".join(f"{k}x{v}" if v > 1 else k for k, v in counts.items()) + "}")
+            parts.append(tools_section(tools))
         return f"{flag}[{turn.idx:>4}] {fmt_ts(turn.ts)} ASST   " + " ".join(parts)
 
     if turn.kind == "command":
@@ -970,7 +1081,7 @@ def select_range(turns, opts):
         pat = re.compile(opts.grep, re.I)
         keep = set()
         for i, t in enumerate(turns):
-            if pat.search(turn_blob(t.payload)):
+            if turn_matches(t, pat):
                 for j in range(max(0, i - opts.context), min(len(turns), i + opts.context + 1)):
                     keep.add(j)
         turns = [t for i, t in enumerate(turns) if i in keep]
@@ -1108,11 +1219,25 @@ def cmd_show(opts):
             print(f"Showing:  turns {selected[0].idx if selected else '-'}..{selected[-1].idx if selected else '-'} of {len(turns)}")
         print("\n" + "=" * 78 + "\n")
 
+    hidden = 0
     for t in selected:
         text = turn_text(t, results, opts)
         if text:
             print(text)
             print()
+        else:
+            hidden += 1
+    # A turn that renders to nothing still holds its number, so the range quietly
+    # under-delivers - and `search` reports hits inside system-injected turns,
+    # which makes following one to `show --range` land on blank output. Say so,
+    # and name the flag that brings them back.
+    if hidden:
+        sys.stdout.flush()
+        print(
+            f"({hidden} turn{'s' if hidden > 1 else ''} in this range rendered nothing "
+            "at these flags - system-injected or empty; --meta shows them)",
+            file=sys.stderr,
+        )
 
 
 def cmd_search(opts):
@@ -1135,7 +1260,7 @@ def cmd_search(opts):
             continue
         local = []
         for t in turns:
-            if pat.search(turn_blob(t.payload)) or pat.search(turn_summary(t)):
+            if turn_matches(t, pat) or pat.search(turn_summary(t)):
                 local.append(t)
                 if len(local) >= opts.max_per_session:
                     break
@@ -1166,39 +1291,68 @@ def cmd_search(opts):
     )
 
 
-def content_strings(payload):
-    """Every string in a record that is actual content, skipping identifiers.
+def looks_like_a_blob(text):
+    """True for base64 and friends — long, and without a space anywhere in it."""
+    return len(text) > BLOB_CHARS and not any(c.isspace() for c in text)
+
+
+def content_strings(node, out=None):
+    """Every string under `node` that is actual content, skipping identifiers.
 
     Searching the raw JSON matches base64 `thinking` signatures and uuids, which
     both produces false hits and prints unreadable blobs as if they were matching
     lines.
     """
-    haystack = []
-
-    def walk(node):
-        if isinstance(node, str):
-            haystack.append(node)
-        elif isinstance(node, dict):
-            for k, v in node.items():
-                if k not in NON_CONTENT_KEYS:
-                    walk(v)
-        elif isinstance(node, list):
-            for v in node:
-                walk(v)
-
-    walk(payload)
-    return haystack
+    if out is None:
+        out = []
+    if isinstance(node, str):
+        if not looks_like_a_blob(node):
+            out.append(node)
+    elif isinstance(node, dict):
+        for k, v in node.items():
+            if k not in NON_CONTENT_KEYS:
+                content_strings(v, out)
+    elif isinstance(node, list):
+        for v in node:
+            content_strings(v, out)
+    return out
 
 
-def turn_blob(payload):
-    """One searchable string per turn, identifiers excluded."""
-    return "\n".join(content_strings(payload))
+def turn_haystack(turn):
+    """Every content string in a whole turn — merged blocks and folded results.
+
+    `turn.payload` is the record that *started* the turn, and an assistant
+    response is written one content block per record, so the payload holds the
+    first block and nothing else: not the tool calls that follow it, and never
+    the tool results, which `build_turns` files separately so they can be folded
+    under their call. Searching the payload alone therefore missed 74% of tool
+    calls and 100% of tool output — 89% of all content by volume — and missed it
+    silently, since a search that finds nothing says the same thing either way.
+    """
+    out = []
+    blocks = getattr(turn, "blocks", None) or ()
+    if blocks:
+        # skip `message`, whose content is blocks[0]; the merged list has them all
+        content_strings({k: v for k, v in turn.payload.items() if k != "message"}, out)
+        for block in blocks:
+            content_strings(block, out)
+    else:
+        content_strings(turn.payload, out)
+    for result, block in getattr(turn, "results", None) or ():
+        content_strings(result, out)
+        content_strings(block, out)
+    return out
+
+
+def turn_matches(turn, pat):
+    """True if the pattern occurs anywhere in the turn. Stops at the first hit."""
+    return any(pat.search(s) for s in turn_haystack(turn))
 
 
 def matching_lines(turn, pat, context):
-    """Pull the actual matching text lines out of a turn payload."""
+    """Pull the actual matching text lines out of a turn."""
     out = []
-    for chunk in content_strings(turn.payload):
+    for chunk in turn_haystack(turn):
         for line in chunk.split("\n"):
             if pat.search(line):
                 out.append(quote_framing(oneline(line, 160)))

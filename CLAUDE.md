@@ -48,18 +48,24 @@ Sections are marked by `# ---` banners, in pipeline order:
 1. **Text helpers** — `clip`, `oneline`, `strip_reminders`, `command_stdout`,
    `slash_command`. Envelope strippers matter: slash-command and
    `<local-command-stdout>` wrappers must not render as user speech.
-2. **Discovery** — `encode_cwd`, `all_session_files`, `Meta` / `read_meta`,
-   `resolve_session`. `read_meta` scans cheaply for `list`; it must stay fast
-   because it runs over every file on disk.
+2. **Discovery** — `encode_cwd`, `looks_like_path`, `all_session_files`, `Meta` /
+   `read_meta`, `resolve_session`, `newest_session`. `read_meta` scans cheaply for
+   `list`; it must stay fast because it runs over every file on disk.
 3. **Tool rendering** — `render_tool_input`, `render_tool_result`. Prefer the
    `toolUseResult` field over the `tool_result` block; it is the richer,
    structured version.
 4. **Turn assembly** — `Turn`, `build_turns`, `open_assistant_turn`, `is_real_prompt`,
    `chain_parent`, `mark_abandoned`. This is where the two format traps live.
    `open_assistant_turn` decides what may interrupt a response without ending it;
-   `chain_parent` keeps the parent chain connected across a compaction.
-5. **Output** — `turn_text`, `turn_summary`, `session_header`, `select_range`.
-6. **Commands** — `cmd_projects`, `cmd_list`, `cmd_outline`, `cmd_show`,
+   `chain_parent` keeps the parent chain connected across a compaction. Note that
+   `Turn.payload` is only the record that *started* the turn — `blocks` and
+   `results` are what hold the whole of it.
+5. **Output** — `turn_text`, `turn_summary`, `tool_target`, `tools_section`,
+   `session_header`, `select_range`.
+6. **Searching** — `content_strings`, `looks_like_a_blob`, `turn_haystack`,
+   `turn_matches`, `matching_lines`. Every matcher goes through `turn_haystack`;
+   nothing should reach back to `payload` to decide whether a turn matches.
+7. **Commands** — `cmd_projects`, `cmd_list`, `cmd_outline`, `cmd_show`,
    `cmd_search`, then `main`. Shared flags come from `add_render_flags` /
    `add_select_flags`; add a flag there, not per-command, unless it genuinely
    belongs to one.
@@ -77,11 +83,12 @@ These were each found by breaking them. Regressions here are silent, not loud.
   across actual conversation.
 - **Rewind detection is strict.** A rewind is two *real* user prompts sharing one
   `parentUuid` — "real" excludes `tool_result` content and `isMeta` records. The
-  loose heuristic (any parent with multiple children) false-positives on **61%**
-  of transcripts here and rising: broken down by Claude Code version it runs 36%
-  on 2.1.140 and 66–74% on 2.1.187 through 2.1.220, against 1.5% for the strict
-  rule. If you touch `mark_abandoned`, re-check both a true positive and a known
-  false positive.
+  loose heuristic (any parent with multiple children) false-positives on **60%**
+  of transcripts here (375 of 630), against **1.3%** — 8 files — for the strict
+  rule. That 8 has not moved across 84 more transcripts than the previous survey,
+  which is the useful signal: the strict rule is stable, the loose one tracks
+  whatever the harness happens to be writing (65–71% per recent release). If you
+  touch `mark_abandoned`, re-check both a true positive and a known false positive.
 - **The calling session is excluded from `list` and `search`.** Its transcript
   contains the question being asked, so it matches nearly any query, and being the
   newest file it sorts first. In a four-model trial every single `search` spent
@@ -94,7 +101,25 @@ These were each found by breaking them. Regressions here are silent, not loud.
 - **Search matches content, not identifiers.** `NON_CONTENT_KEYS` keeps base64
   `thinking` signatures and uuids out of both the match test and the printed
   lines; without it a short pattern hits base64 and prints blobs as if they were
-  matching text.
+  matching text. `looks_like_a_blob` is the same guard one level up, for the
+  base64 images that arrive inside tool results — one here is a 58 KB PNG on a
+  single line. It keys on *length with no whitespace*, never length alone: a
+  dumped file is long too and has to stay findable.
+- **Search reads the whole turn, not `turn.payload`.** `absorb` merges an
+  assistant response's blocks but leaves `payload` on the first record, and tool
+  results are folded in separately — so searching the payload saw one content
+  block and no tool output at all. That hid **89%** of all content, and hid it
+  silently, since a search that finds nothing prints the same thing whether or not
+  the text was there: `search "No such file or directory" --all` found 5 sessions
+  of the 85 containing it. `turn_haystack` is the fix and every matcher goes
+  through it — `select_range`, `cmd_search`, `matching_lines`. It costs about 2x
+  on a full-corpus search (4.7s → 9.1s over 299 MB), which is the right trade.
+  What it deliberately still does *not* reach is anything filtered out before a
+  turn exists: `NOISE_TYPES`, and attachments outside `INTERESTING_ATTACHMENTS` —
+  `nested_memory` above all, which is the CLAUDE.md injected into every session.
+  40 files here "contain" a pattern only in that sense. Indexing it would make
+  every session on the machine match anything in the user's memory files, which
+  is the same crowding-out that hiding the current session exists to prevent.
 - **Envelope wrappers never render as speech.** `<command-name>` and
   `<local-command-stdout>` are containers, not content. Both the `user` path and
   the `system`/`local_command` path have to strip them, in `turn_text` *and*
@@ -107,17 +132,49 @@ These were each found by breaking them. Regressions here are silent, not loud.
   `FRAMING_RE` with `> `; `clip` is the chokepoint every content path goes
   through, and `matching_lines` covers `search`. Keep `FRAMING_RE` tight: it
   matched `=== banner ===` at first and fired on 326 lines of a 40-file sample,
-  because shell scripts echo that constantly. As written it fires on **zero**
-  lines of that sample, which is the bar - a false positive is pure noise in the
-  common case. The real truncation notice is appended *after* quoting, on
-  purpose; quoting it would break the `--full` hint.
+  because shell scripts echo that constantly. Keeping it that tight is the bar - a
+  false positive is pure noise in the common case. The real truncation notice is
+  appended *after* quoting, on purpose; quoting it would break the `--full` hint.
+  It no longer fires on zero lines of that sample: it fires **57 times in ~21,000
+  rendered lines across 40 sessions**, and every one is a true positive - this
+  tool's own headers, its `====` rule, and the retired `▶`/`⤷` glyphs, quoted
+  inside transcripts of sessions that ran it. That is the mechanism earning its
+  keep, not drift. The retired glyphs in `FRAMING_RE` are what catch the old
+  renders still sitting on disk; do not tidy them out.
+- **`outline` names what a tool acted on.** `{Edit}` does not say what was
+  edited, and answering "which files did this session change" meant a full render
+  - 89 KB for one 2.9 MB transcript, which is the cost this tool exists to avoid.
+  `tool_target` covers file paths, Grep/Glob patterns and agent/skill names, and
+  **excludes Bash on purpose**: Bash is 45% of all tool calls, so its description
+  costs 12 points of outline size by itself (159× → 143×), nearly three times what
+  everything else costs together (+4.3%, 166× → 159×). Price a new entry before
+  adding one. `TOOLS_SECTION_CHARS` caps the braces so a turn with a dozen calls
+  cannot run away with the line.
+- **`latest` is scoped, and never the caller.** It used to mean "newest file
+  anywhere under `PROJECTS_DIR`", which on a box running several sessions
+  resolved to the transcript of the session doing the asking - the exact thing
+  `list` and `search` hide - or to an unrelated busy project. Both were seen
+  live, minutes apart. `newest_session` scopes to the working directory the way
+  `list` does, falls back across projects only when this one is empty, and says
+  so when it does.
+- **Project lookup prefers an exact directory match.** Substring is the fallback
+  that makes `--project rc-g2` and a parent path work, but as the primary rule it
+  swept in every scratchpad: `/tmp/claude-<id>/<encoded-cwd>/…/scratchpad` encodes
+  to a name *containing* the project's own, and three of the top five sessions
+  listed for this repo were throwaway scratch sessions from a different cwd.
+- **`show` says what it left out.** A turn that renders empty still holds its
+  number, so a range quietly under-delivers - 2.6% of turns at default flags.
+  `search` reports hits inside system-injected turns, which is how a reader gets
+  sent to a `show --range` that then prints nothing at all.
 - **Turn numbers are stable across flags.** Numbering happens before filtering, so
   an `outline` and a later `show --range` always line up. Filtering must never
   renumber.
 - **`AskUserQuestion` results are never clipped.** The user's answer is the point
   of the turn.
 - **Tool results fold under their call** via `tool_use_id` → `tool_use.id`, not by
-  document order.
+  document order — for search as well as for display. `build_turns` attaches them
+  to the calling turn (`Turn.results`) precisely because searching has to know
+  what a turn contains before deciding whether to print it.
 - **`main` forces UTF-8 on stdout.** Windows Python encodes to cp1252 whenever
   stdout is a pipe rather than a console — precisely how a tool harness reads it.
   Dropping `force_utf8_output` breaks Windows two ways, and the quiet one is
@@ -148,9 +205,17 @@ TRANSCRIPT_FULL_SWEEP=1 python3 -m unittest discover -s tests   # every transcri
 Two halves, and both matter. Most classes build **synthetic records** — a rewind,
 a compaction, a response split by a truncation notice are all too rare to find on
 demand in a real corpus, and a fixture states the shape exactly. `TestRealTranscripts`
-then sweeps **whatever is actually on the machine** (546 files here), which is what
-catches format drift no fixture anticipates; it skips cleanly on a machine with
-none, and samples ~40 files unless `TRANSCRIPT_FULL_SWEEP=1`.
+then sweeps **whatever is actually on the machine** (630 files, 299 MB here), which
+is what catches format drift no fixture anticipates; it skips cleanly on a machine
+with none, and samples ~40 files unless `TRANSCRIPT_FULL_SWEEP=1`.
+
+Two things this corpus cannot exercise, so do not read a green suite as covering
+them. **Sidechains**: all 630 files have `isSidechain: false` throughout, so
+`[subagent]` and `--no-sidechains` have no coverage beyond not crashing.
+**Compaction**: there is not one genuine `compact_boundary` record anywhere in it —
+every file that greps positive is quoting the string, this repo's own source
+included — so the whole compaction path rests on synthetic fixtures and the
+original survey. Check with a parse, never a grep.
 
 A test that cannot fail is worse than no test. After changing a fix, revert it and
 confirm the suite goes red — every fix currently in the file was checked that way.
@@ -167,10 +232,8 @@ done
 
 After a rendering change, eyeball a session that exercises the hard cases rather
 than trusting exit status — merged multi-block turns, a rewound session, an
-`AskUserQuestion`, and a Bash call with both stdout and stderr. Note that
-**sidechains cannot be eyeballed here**: all 63,250 `isSidechain` values in this
-corpus are `false`, so the `[subagent]` tag and `--no-sidechains` have no local
-coverage beyond not crashing.
+`AskUserQuestion`, and a Bash call with both stdout and stderr. Sidechains and
+compaction are the two you cannot eyeball here at all; see the note above.
 
 ### Checking Windows behaviour from a Linux box
 
@@ -234,9 +297,18 @@ the same rewind. Treat these as instrumentation checks, not benchmarks — the
 finding is whether a signal is *reachable*, not which model scores best.
 
 Check the compression ratio when output format changes; it is the tool's reason
-for existing. Currently ~220× for `outline` and ~15× for `show` across a 25 MB
-sample; treat 170× / 10× as the floor. `TestRealTranscripts` asserts the outline
-floor automatically.
+for existing. Measure it the way the numbers below were measured — run the old
+and new scripts over the *same* file list, because sampling noise between two
+runs is larger than the effect of most changes.
+
+Currently **159× for `outline` and 10.7× for `show`** over a 28.6 MB, 35-file
+sample. Those replace a documented "~220× / ~15×, floor 170× / 10×" that the
+corpus had quietly fallen through: the assertion only ever guarded 100×, so
+`show` drifted under its stated floor with the suite green throughout. Both are
+asserted now, at 100× and 5× — set below the aggregate rather than beside it,
+because the ratio is a strong function of session size and the mix moves. It runs
+44× on a small transcript and 492× on the 13.5 MB one, which is the right way
+round: the compression is largest exactly where it is needed.
 
 ## Releasing
 

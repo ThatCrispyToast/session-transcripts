@@ -5,16 +5,16 @@ Claude Code writes every session to
 content block, interleaved with harness bookkeeping. Nobody was meant to read it
 directly, and a model that tries spends its context on `parentUuid` fields.
 
-This renders it instead. The largest transcript in a ~400 session survey ran
-1.9 MB. As an outline it's 11 KB.
+This renders it instead. The largest transcript in a 627 session survey ran
+13.5 MB. As an outline it's 27 KB, produced in a quarter of a second.
 
 ```
 $ transcript.py outline c93a1254
 
  [   4] 13:47:56 USER   Create a claude skill that allows a claude session to parse transcripts…
  [   5] 13:47:59 ASST   I'll create this skill. Let me first look at the actual transcript… {Bashx2}
- [  20] 13:54:06 ASST   Confirmed - each assistant response is split across multiple records… {Edit}
- [  35] 13:56:17 ASST   Real rewinds exist in only 2 files - my detector was over-broad… {Edit}
+ [  20] 13:54:06 ASST   Confirmed - each assistant response is split across multiple records… {Edit: transcript.py}
+ [  35] 13:56:17 ASST   Real rewinds exist in only 2 files - my detector was over-broad… {Edit: transcript.py}
 ```
 
 ## Install
@@ -58,13 +58,21 @@ thing this exists to avoid.
 An outline line:
 
 ```
- [   4] 11:49:08 ASST   Found description.txt locally. Now let me check… {Read, Bash}
+ [   4] 11:49:08 ASST   Found description.txt locally. Now let me check… {Read: description.txt, Bash}
 ```
 
-`[4]` is what you pass to `--range`. The braces list tools that turn called. Turn
-numbers never shift between commands, so an outline and a later `show` always
-agree - numbering happens before filtering, on purpose. In `show`, `->` marks a
-tool call and `<-` its result, folded in underneath.
+`[4]` is what you pass to `--range`. The braces list tools that turn called, each
+with what it acted on - the file, the pattern, the agent's task - which is what
+makes "which files did this change" an outline question. Two are named and the
+rest counted; Bash stays bare, since it is nearly half of all tool calls and its
+description would cost more than everything else together. Turn numbers never
+shift between commands, so an outline and a later `show` always agree - numbering
+happens before filtering, on purpose. In `show`, `->` marks a tool call and `<-`
+its result, folded in underneath.
+
+`search` and `--grep` read the whole turn, including tool calls and their output,
+so a stack trace is as findable as a sentence someone typed. Both take a regex, so
+brackets need escaping.
 
 Transcripts quote things, and some of what they quote looks like this renderer's
 own output - a fetched page, a pasted log, a transcript of a transcript. A
@@ -90,7 +98,8 @@ project).
 `list` and `search` tag a session `[rewound]` or `[compacted]` when its history
 needs care, and both hide the session you are running in - it contains whatever
 you just asked, so it matches nearly every query and sorts first. `--include-current`
-turns that off.
+turns that off. `latest` is scoped the same way: the newest session for the current
+project, never the one asking.
 
 ## Transcript Format
 
@@ -113,10 +122,9 @@ anything else.
 `parentUuid` reads like a linked list and behaves like a tree, where a node with
 several children is completely ordinary: the text block above and the
 `tool_result` answering its Bash call both point at the same parent. Treat any
-fork as a rewind and 335 of the 546 transcripts on this machine look rewound. The
-true count is 8. That gap widens with every release - the same loose rule flags
-36% of transcripts written by Claude Code 2.1.140 and 74% of those written by
-2.1.220.
+fork as a rewind and 375 of the 630 transcripts on this machine look rewound. The
+true count is still 8, unchanged across 84 more transcripts than the last survey.
+The loose rule flags 65-71% of the files written by recent Claude Code releases.
 
 A rewind is two user prompts under one parent, and `type: "user"` alone doesn't
 identify a prompt - tool results arrive under that type, as does injected context

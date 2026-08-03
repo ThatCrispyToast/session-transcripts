@@ -803,7 +803,7 @@ class TestSearchableText(unittest.TestCase):
     }
 
     def test_signatures_and_uuids_are_not_searchable(self):
-        blob = T.turn_blob(self.PAYLOAD)
+        blob = "\n".join(T.content_strings(self.PAYLOAD))
         self.assertIn("the real reasoning", blob)
         self.assertIn("the real answer", blob)
         self.assertNotIn("CAIS4E4", blob)
@@ -900,6 +900,367 @@ class TestTriageFlags(unittest.TestCase):
                 path = c.write(tmp)
                 turns, _ = T.build_turns(list(T.iter_records(path)))
                 self.assertEqual(T.read_meta(path).rewound, T.has_branches(turns))
+
+
+class TestWholeTurnIsSearchable(unittest.TestCase):
+    """A turn's searchable text was one record out of many.
+
+    `absorb` merges an assistant response's content blocks into `turn.blocks`
+    but leaves `turn.payload` on the first record, and `build_turns` files
+    `tool_result` records in a render-only dict. Searching the payload
+    therefore missed every tool call after the first block - 74% of assistant
+    turns in a 25-session sample - and every tool result outright, which is 89%
+    of all content. Measured against the real corpus: 57 transcripts contain
+    `Traceback (most recent call last)` and `search` found it in none of them,
+    reporting "0 matching turns" in exactly the words it uses for a pattern
+    that never occurred.
+    """
+
+    def _session(self):
+        c = Convo()
+        c.user("check the build")
+        c.assistant_block("msg_A", text_block("Let me run it."))
+        c.assistant_block("msg_A", tool_block(
+            "Bash", "t1", {"command": "make", "description": "Build the project"}))
+        c.tool_result("t1", "boom", tool_use_result={
+            "stdout": "", "stderr": "Traceback (most recent call last)\n  ZeroDivisionError"})
+        turns, results = T.build_turns(c.records)
+        return turns, results
+
+    def _assistant(self):
+        turns, _ = self._session()
+        return [t for t in turns if t.kind == "assistant"][0]
+
+    def test_the_payload_really_is_only_the_first_block(self):
+        """Guards the premise: if this ever stops being true the rest is moot."""
+        payload = "\n".join(T.content_strings(self._assistant().payload))
+        self.assertNotIn("Build the project", payload)
+        self.assertNotIn("ZeroDivisionError", payload)
+
+    def test_tool_call_after_the_first_block_is_searchable(self):
+        self.assertTrue(T.turn_matches(self._assistant(), re.compile("Build the project")))
+
+    def test_tool_result_is_searchable(self):
+        self.assertTrue(T.turn_matches(self._assistant(), re.compile("ZeroDivisionError")))
+
+    def test_matching_lines_quotes_the_line_from_the_result(self):
+        lines = T.matching_lines(self._assistant(), re.compile("ZeroDivisionError"), 3)
+        self.assertEqual(lines, ["ZeroDivisionError"])
+
+    def test_grep_selects_the_turn_by_its_tool_output(self):
+        turns, _ = self._session()
+        picked = T.select_range(turns, opts(grep="ZeroDivisionError", context=0))
+        self.assertEqual([t.kind for t in picked], ["assistant"])
+
+    def test_search_reports_a_hit_that_only_exists_in_tool_output(self):
+        import io as _io, contextlib as _c
+        c = Convo()
+        c.user("run it")
+        c.assistant_block("msg_A", text_block("Running."))
+        c.assistant_block("msg_A", tool_block("Bash", "t1", {"command": "pytest"}))
+        c.tool_result("t1", "x", tool_use_result={"stdout": "ZeroDivisionError in test_ratio", "stderr": ""})
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "-a-b"
+            project.mkdir()
+            c.write(project)
+            old_dir, old_cur = T.PROJECTS_DIR, T.CURRENT_SESSION_ID
+            try:
+                T.PROJECTS_DIR = Path(tmp)
+                T.CURRENT_SESSION_ID = ""
+                buf = _io.StringIO()
+                o = opts(project=str(project), all=True, case_sensitive=False, since=None,
+                         limit=10, max_per_session=5, render=False, include_current=True)
+                with _c.redirect_stdout(buf), _c.redirect_stderr(_io.StringIO()):
+                    T.cmd_search(Namespace(pattern="ZeroDivisionError", **vars(o)))
+                self.assertIn("ZeroDivisionError in test_ratio", buf.getvalue())
+            finally:
+                T.PROJECTS_DIR, T.CURRENT_SESSION_ID = old_dir, old_cur
+
+    def test_base64_blobs_stay_out_of_search(self):
+        """One real tool result in this corpus carries a 58 KB base64 PNG.
+
+        Searching it is the failure NON_CONTENT_KEYS was written to prevent:
+        short patterns hit the alphabet soup and the blob prints as if it were
+        matching text.
+        """
+        c = Convo()
+        c.user("screenshot it")
+        c.assistant_block("msg_A", tool_block("Bash", "t1", {"command": "shot"}))
+        c.tool_result("t1", "ok", tool_use_result={
+            "stdout": "iVBORw0KGgoAAAANSUhEUg" + "Q" * 2000, "stderr": ""})
+        turns, _ = T.build_turns(c.records)
+        turn = [t for t in turns if t.kind == "assistant"][0]
+        self.assertFalse(T.turn_matches(turn, re.compile("QQQQ")))
+        self.assertEqual(T.matching_lines(turn, re.compile("QQQQ"), 3), [])
+
+    def test_long_prose_results_are_still_searchable(self):
+        """The blob guard keys on the absence of whitespace, not on length -
+        a dumped file is long and must stay findable."""
+        c = Convo()
+        c.user("read it")
+        c.assistant_block("msg_A", tool_block("Read", "t1", {"file_path": "/a/b.txt"}))
+        c.tool_result("t1", "x", tool_use_result={
+            "type": "text",
+            "file": {"filePath": "/a/b.txt", "numLines": 1, "totalLines": 1,
+                     "content": "the needle is here " * 400}})
+        turns, _ = T.build_turns(c.records)
+        turn = [t for t in turns if t.kind == "assistant"][0]
+        self.assertTrue(T.turn_matches(turn, re.compile("needle")))
+
+
+class TestOutlineNamesItsTargets(unittest.TestCase):
+    """`{Edit}` does not say what was edited.
+
+    Answering "which files did we change" had no cheap route: `--grep` on a
+    path found 4 of 11 edits and the only reliable answer was rendering the
+    whole session, 89 KB for one 2.9 MB transcript, which is the cost this
+    tool exists to avoid. Targets were priced over a 28.6 MB sample, old and
+    new run across identical files: file paths, patterns and agent/skill names
+    together cost 4.3% of outline size (166x -> 159x). Bash descriptions cost
+    12 points more on their own (159x -> 143x), because Bash is 45% of all
+    tool calls, so Bash stays bare - `show` already prints its description and
+    its command.
+    """
+
+    def _summary(self, *blocks):
+        c = Convo()
+        c.user("go")
+        for b in blocks:
+            c.assistant_block("msg_A", b)
+        turns, _ = T.build_turns(c.records)
+        return T.turn_summary([t for t in turns if t.kind == "assistant"][0])
+
+    def test_file_tools_name_the_file(self):
+        self.assertIn("Edit: ui.ts", self._summary(
+            tool_block("Edit", "t1", {"file_path": "/home/me/proj/src/ui.ts"})))
+
+    def test_distinct_targets_are_listed(self):
+        s = self._summary(
+            tool_block("Edit", "t1", {"file_path": "/p/ui.ts"}),
+            tool_block("Edit", "t2", {"file_path": "/p/app.json"}))
+        self.assertIn("ui.ts", s)
+        self.assertIn("app.json", s)
+
+    def test_many_targets_are_counted_not_listed(self):
+        s = self._summary(*[
+            tool_block("Edit", f"t{i}", {"file_path": f"/p/f{i}.ts"}) for i in range(5)])
+        self.assertIn("+3", s)
+
+    def test_repeated_identical_targets_collapse(self):
+        s = self._summary(
+            tool_block("Edit", "t1", {"file_path": "/p/ui.ts"}),
+            tool_block("Edit", "t2", {"file_path": "/p/ui.ts"}))
+        self.assertEqual(s.count("ui.ts"), 1)
+
+    def test_bash_stays_bare(self):
+        s = self._summary(tool_block("Bash", "t1", {"command": "ls", "description": "List files"}))
+        self.assertIn("{Bash}", s)
+        self.assertNotIn("List files", s)
+
+    def test_grep_names_its_pattern_and_agents_their_subject(self):
+        self.assertIn("Grep: TODO", self._summary(tool_block("Grep", "t1", {"pattern": "TODO"})))
+        self.assertIn("Agent: audit deps", self._summary(
+            tool_block("Agent", "t1", {"description": "audit deps"})))
+        self.assertIn("Skill: run", self._summary(tool_block("Skill", "t1", {"skill": "run"})))
+
+    def test_the_tools_section_stays_bounded(self):
+        s = self._summary(*[
+            tool_block("Edit", f"t{i}", {"file_path": f"/p/{'x' * 60}{i}.ts"}) for i in range(9)])
+        self.assertLessEqual(len(s[s.index("{"):]), T.TOOLS_SECTION_CHARS + 2)
+
+    def test_a_missing_target_does_not_invent_one(self):
+        self.assertIn("{Edit}", self._summary(tool_block("Edit", "t1", {})))
+
+    def test_a_windows_path_is_shortened_too(self):
+        """Transcripts get copied between machines, so the separator is not the
+        host's. os.path.basename on a POSIX box returns the whole backslash path."""
+        self.assertEqual(T.tool_target("Edit", {"file_path": r"C:\Users\me\proj\ui.ts"}), "ui.ts")
+        self.assertEqual(T.tool_target("Read", {"file_path": "/home/me/proj/ui.ts"}), "ui.ts")
+
+    def test_a_long_target_is_capped(self):
+        got = T.tool_target("Grep", {"pattern": "x" * 200})
+        self.assertEqual(len(got), T.TARGET_CHARS)
+
+    def test_a_multiline_target_stays_on_one_line(self):
+        got = T.tool_target("Agent", {"description": "audit\nthe deps"})
+        self.assertEqual(got, "audit the deps")
+
+
+class TestShowSaysWhatItLeftOut(unittest.TestCase):
+    """`show --range N` could print a header and nothing else.
+
+    A turn that renders empty at default flags still occupies its number, so
+    the range silently under-delivers - 2.6% of turns in a 30-session sample.
+    `search` makes this reachable: it reports hits inside system-injected
+    turns, and following one to `show --range` produced blank output with no
+    hint that `--meta` was the missing flag.
+    """
+
+    def _run(self, **kw):
+        import io as _io, contextlib as _c
+        c = Convo()
+        c.user("real prompt")
+        c.user("injected context", isMeta=True)
+        c.assistant_block("msg_A", text_block("answer"))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = c.write(tmp)
+            out, err = _io.StringIO(), _io.StringIO()
+            o = opts(no_header=True, **kw)
+            with _c.redirect_stdout(out), _c.redirect_stderr(err):
+                T.cmd_show(Namespace(session=str(path), **vars(o)))
+            return out.getvalue(), err.getvalue()
+
+    def test_a_range_of_only_hidden_turns_says_so(self):
+        out, err = self._run(range="2")
+        self.assertEqual(out.strip(), "")
+        self.assertIn("--meta", err)
+
+    def test_the_count_is_reported(self):
+        _, err = self._run(range="1-3")
+        self.assertIn("1", err)
+        self.assertIn("--meta", err)
+
+    def test_nothing_is_said_when_nothing_was_hidden(self):
+        _, err = self._run(range="1", meta=False)
+        self.assertNotIn("--meta", err)
+
+    def test_the_flag_makes_the_note_go_away(self):
+        out, err = self._run(range="2", meta=True)
+        self.assertIn("injected context", out)
+        self.assertNotIn("--meta", err)
+
+
+class TestLatestResolution(unittest.TestCase):
+    """`latest` was the newest file anywhere, the caller's own included.
+
+    `list` and `search` hide the calling session because it contains the
+    question being asked; `latest` walked straight back into it. Observed
+    live on a multi-session box: two `outline latest` calls minutes apart
+    resolved to the caller's own transcript and then to an unrelated
+    project's. Naming a session id explicitly still reaches anything.
+    """
+
+    def _box(self, tmp):
+        """Two projects, four sessions, with mtimes making the order explicit.
+
+        `dddd` sits in the other project and is the newest file on the box by a
+        wide margin, which is the situation `latest` used to get wrong.
+        """
+        import time
+        here, there = Path(tmp) / "-a-here", Path(tmp) / "-a-there"
+        here.mkdir(); there.mkdir()
+        made = {}
+        for directory, name in ((there, "dddd"), (here, "aaaa"), (here, "cccc"), (here, "bbbb")):
+            c = Convo()
+            c.user(f"prompt in {name}")
+            made[name] = c.write(directory, name=f"{name}.jsonl")
+            time.sleep(0.01)
+        os.utime(made["dddd"], (2_000_000_000, 2_000_000_000))
+        return made
+
+    def test_latest_skips_the_calling_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            made = self._box(tmp)
+            old_dir, old_cur = T.PROJECTS_DIR, T.CURRENT_SESSION_ID
+            try:
+                T.PROJECTS_DIR = Path(tmp)
+                T.CURRENT_SESSION_ID = "bbbb"  # the newest in this project
+                self.assertEqual(T.resolve_session("latest", "-a-here").stem, "cccc")
+            finally:
+                T.PROJECTS_DIR, T.CURRENT_SESSION_ID = old_dir, old_cur
+            self.assertTrue(made["bbbb"].exists(), "hiding a session must not delete it")
+
+    def test_latest_prefers_the_current_project_over_a_newer_stranger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._box(tmp)
+            old_dir, old_cur = T.PROJECTS_DIR, T.CURRENT_SESSION_ID
+            try:
+                T.PROJECTS_DIR = Path(tmp)
+                T.CURRENT_SESSION_ID = ""
+                self.assertEqual(T.resolve_session("latest", "-a-here").stem, "bbbb")
+            finally:
+                T.PROJECTS_DIR, T.CURRENT_SESSION_ID = old_dir, old_cur
+
+    def test_latest_falls_back_across_projects_and_says_so(self):
+        import io as _io, contextlib as _c
+        with tempfile.TemporaryDirectory() as tmp:
+            self._box(tmp)
+            old_dir, old_cur = T.PROJECTS_DIR, T.CURRENT_SESSION_ID
+            try:
+                T.PROJECTS_DIR = Path(tmp)
+                T.CURRENT_SESSION_ID = ""
+                err = _io.StringIO()
+                with _c.redirect_stderr(err):
+                    got = T.resolve_session("latest", "-a-empty")
+                self.assertEqual(got.stem, "dddd")
+                self.assertIn("another project", err.getvalue())
+            finally:
+                T.PROJECTS_DIR, T.CURRENT_SESSION_ID = old_dir, old_cur
+
+    def test_naming_the_current_session_still_works(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            made = self._box(tmp)
+            old_dir, old_cur = T.PROJECTS_DIR, T.CURRENT_SESSION_ID
+            try:
+                T.PROJECTS_DIR = Path(tmp)
+                T.CURRENT_SESSION_ID = "bbbb"
+                self.assertEqual(T.resolve_session("bbbb").stem, "bbbb")
+            finally:
+                T.PROJECTS_DIR, T.CURRENT_SESSION_ID = old_dir, old_cur
+            self.assertTrue(made["bbbb"].exists())
+
+
+class TestProjectMatching(unittest.TestCase):
+    """Project lookup matched on substring, so a scratchpad under
+    /tmp/claude-<id>/<encoded-cwd>/... counted as the project itself. Three of
+    the top five sessions for this repo were throwaway scratch sessions from a
+    different working directory.
+    """
+
+    def _box(self, tmp):
+        real = Path(tmp) / T.encode_cwd("/home/me/proj")
+        nested = Path(tmp) / T.encode_cwd("/tmp/claude-1000/-home-me-proj/x/scratchpad")
+        for d in (real, nested):
+            d.mkdir()
+            c = Convo()
+            c.user("hello")
+            c.write(d, name=f"{d.name[-8:]}.jsonl")
+        return real, nested
+
+    def test_exact_directory_wins_over_substring(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            real, nested = self._box(tmp)
+            old = T.PROJECTS_DIR
+            try:
+                T.PROJECTS_DIR = Path(tmp)
+                found = list(T.all_session_files("/home/me/proj"))
+                self.assertEqual([f.parent.name for f in found], [real.name])
+            finally:
+                T.PROJECTS_DIR = old
+            self.assertTrue(nested.exists())
+
+    def test_substring_still_finds_a_bare_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._box(tmp)
+            old = T.PROJECTS_DIR
+            try:
+                T.PROJECTS_DIR = Path(tmp)
+                self.assertTrue(list(T.all_session_files("me-proj")))
+            finally:
+                T.PROJECTS_DIR = old
+
+    def test_a_parent_path_still_gathers_children(self):
+        """The substring fallback is what makes `--project ~/Programs` useful:
+        no directory is named for the parent, so nothing matches exactly."""
+        with tempfile.TemporaryDirectory() as tmp:
+            real, _ = self._box(tmp)
+            old = T.PROJECTS_DIR
+            try:
+                T.PROJECTS_DIR = Path(tmp)
+                found = [f.parent.name for f in T.all_session_files("/home/me")]
+                self.assertIn(real.name, found)
+            finally:
+                T.PROJECTS_DIR = old
 
 
 class TestCrossPlatform(unittest.TestCase):
@@ -1058,7 +1419,12 @@ class TestRealTranscripts(unittest.TestCase):
         self.assertLessEqual(strict, loose)
 
     def test_outline_stays_far_smaller_than_the_raw_file(self):
-        """Compression is the whole reason this tool exists."""
+        """Compression is the whole reason this tool exists.
+
+        Measured 159x over a 28.6 MB sample; it scales with session size, from
+        44x on a small transcript to 492x on the 13.5 MB one, so the floor here
+        is set well under the aggregate rather than near it.
+        """
         raw = rendered = 0
         for path in self.FILES:
             p = Path(path)
@@ -1071,6 +1437,25 @@ class TestRealTranscripts(unittest.TestCase):
         if raw == 0:
             self.skipTest("no transcripts large enough to measure")
         self.assertGreater(raw / rendered, 100, f"outline compression fell to {raw / rendered:.0f}x")
+
+    def test_show_stays_far_smaller_than_the_raw_file(self):
+        """`show` had no floor at all, and it is the number nearest to its own.
+
+        Documented at ~15x for a long time while really running 10.7x, which is
+        how the drift went unnoticed: the outline assertion passed throughout.
+        """
+        raw = rendered = 0
+        for path in self.FILES:
+            p = Path(path)
+            size = p.stat().st_size
+            if size < 50_000:
+                continue
+            _, turns, results = T.load_session(p, opts())
+            raw += size
+            rendered += sum(len(T.turn_text(t, results, opts())) + 1 for t in turns)
+        if raw == 0:
+            self.skipTest("no transcripts large enough to measure")
+        self.assertGreater(raw / rendered, 5, f"show compression fell to {raw / rendered:.1f}x")
 
 
 if __name__ == "__main__":
