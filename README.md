@@ -63,8 +63,13 @@ An outline line:
 
 `[4]` is what you pass to `--range`. The braces list tools that turn called. Turn
 numbers never shift between commands, so an outline and a later `show` always
-agree - numbering happens before filtering, on purpose. In `show`, `▶` marks a
-tool call and `⤷` its result, folded in underneath.
+agree - numbering happens before filtering, on purpose. In `show`, `->` marks a
+tool call and `<-` its result, folded in underneath.
+
+Transcripts quote things, and some of what they quote looks like this renderer's
+own output - a fetched page, a pasted log, a transcript of a transcript. A
+content line that would otherwise read as framing is prefixed with `> `, so the
+only unquoted turn headers are the real ones.
 
 | Flag | Effect |
 |---|---|

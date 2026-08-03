@@ -76,8 +76,9 @@ python3 $T search "flaky test" --all     # regex across transcripts
 flags, so an outline and a later `show` always agree. `{...}` lists tools called in that
 turn. A leading `!` marks a turn on an abandoned branch (see below).
 
-`show` renders `▶` for a tool call and `⤷` for its result, with the result folded in
-right under the call that produced it.
+`show` renders `->` for a tool call and `<-` for its result, with the result folded in
+right under the call that produced it. A content line that would otherwise read as
+framing is prefixed with `> `, so the only unquoted turn headers are the real ones.
 
 ## Flags that matter
 

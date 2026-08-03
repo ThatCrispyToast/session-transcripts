@@ -116,6 +116,33 @@ def fmt_duration(seconds):
     return f"{seconds // 3600}h{(seconds % 3600) // 60:02d}m"
 
 
+# Rendered content sits indented under a header, and that indent is the only
+# thing separating it from the renderer's own framing. Transcripts quote things:
+# a fetched page, a pasted log, or the output of this very script can contain a
+# line that reads exactly like a turn header, and a reader then attributes work
+# to a turn that never happened. Prefix any content line that mimics framing so
+# its first non-space character is a quote marker instead of a marker of ours.
+FRAMING_RE = re.compile(
+    r"""^(?:
+          \#\#[ \t]*\[\d+\]                                    # ## [12] ASSISTANT ...
+        | \#[ \t]+Session[ \t]+[0-9a-fA-F-]{8,}                # # Session <id>
+        | (?:->|<-)[ \t]                                       # the tool call / result markers
+        | [▶⤷]                                       # ...and the glyphs they replaced, which
+                                                               # older renders left inside transcripts
+        | ={40,}[ \t]*$                                        # the rule under the session header
+        | \.\.\.[ \t]\(\+\d+[ \t]lines,[ \t]use[ \t]--full\)   # the truncation notice
+       )""",
+    re.X,
+)
+
+QUOTE_MARK = "> "
+
+
+def quote_framing(line):
+    """Neutralize a content line that imitates this renderer's own framing."""
+    return QUOTE_MARK + line if FRAMING_RE.match(line.lstrip(" \t")) else line
+
+
 def clip(text, max_lines, indent="     "):
     """Trim text to max_lines and cap absurdly long single lines.
 
@@ -128,7 +155,9 @@ def clip(text, max_lines, indent="     "):
         return ""
     lines = text.split("\n")
     capped = [
-        ln if len(ln) <= MAX_LINE_CHARS else ln[:MAX_LINE_CHARS] + f" ... (+{len(ln) - MAX_LINE_CHARS} chars)"
+        quote_framing(
+            ln if len(ln) <= MAX_LINE_CHARS else ln[:MAX_LINE_CHARS] + f" ... (+{len(ln) - MAX_LINE_CHARS} chars)"
+        )
         for ln in lines
     ]
     if max_lines > 0 and len(capped) > max_lines:
@@ -746,19 +775,19 @@ def turn_text(turn, results, opts):
             elif btype == "tool_use":
                 name = block.get("name", "?")
                 head, detail = render_tool_input(name, block.get("input"), opts.full)
-                body.append(f"  ▶ {head}")
+                body.append(f"  -> {head}")
                 if detail:
                     body.append(detail)
                 res = results.get(block.get("id"))
                 if res is not None:
                     rendered = render_tool_result(res[0], res[1], opts.full, opts.max_lines)
                     if rendered.strip():
-                        body.append("  ⤷ result:")
+                        body.append("  <- result:")
                         body.append(rendered)
                     else:
-                        body.append("  ⤷ (empty result)")
+                        body.append("  <- (empty result)")
                 else:
-                    body.append("  ⤷ (no result recorded)")
+                    body.append("  <- (no result recorded)")
         if not body:
             return ""
         return header + "\n" + "\n".join(body)
@@ -1172,7 +1201,7 @@ def matching_lines(turn, pat, context):
     for chunk in content_strings(turn.payload):
         for line in chunk.split("\n"):
             if pat.search(line):
-                out.append(oneline(line, 160))
+                out.append(quote_framing(oneline(line, 160)))
                 if len(out) >= max(1, context):
                     return out
     return out
@@ -1203,12 +1232,17 @@ def add_select_flags(p):
 def force_utf8_output():
     """Emit UTF-8 whatever the platform's default encoding is.
 
-    Rendered output uses ▶, ⤷, ·, — and …. On Windows the default encoding is
-    the ANSI code page (cp1252 on a Western install) whenever stdout is a pipe
-    rather than a console — which is exactly how a tool harness reads it. Two
-    different failures follow from that, and the quiet one is the worse of the
-    pair: `show` dies outright on ▶ (U+25B6, absent from cp1252), while
-    `outline` and `list` exit 0 having written bytes no UTF-8 reader can decode.
+    On Windows the default encoding is the ANSI code page (cp1252 on a Western
+    install) whenever stdout is a pipe rather than a console — which is exactly
+    how a tool harness reads it. Two different failures follow from that, and the
+    quiet one is the worse of the pair: `show` dies outright on any codepoint
+    cp1252 cannot represent, while `outline` and `list` exit 0 having written
+    bytes no UTF-8 reader can decode.
+
+    The framing itself is now ASCII apart from `·` and `…`, both of which cp1252
+    happens to cover — but that buys nothing, because the *content* is arbitrary:
+    transcripts carry emoji, CJK, and em dashes from the model's own prose. The
+    danger moved from the renderer to what it renders; it did not go away.
 
     Python 3.15 makes UTF-8 the default and this becomes a no-op. Until then it
     is the difference between working and not on every Windows host.

@@ -99,6 +99,18 @@ These were each found by breaking them. Regressions here are silent, not loud.
   `<local-command-stdout>` are containers, not content. Both the `user` path and
   the `system`/`local_command` path have to strip them, in `turn_text` *and*
   `turn_summary` — the leak that shipped only affected the latter pair.
+- **Content may never imitate framing.** Rendered content is indented under its
+  header, and that indent was for a long time the *only* thing separating it from
+  a real turn header - so a fetched page, a pasted log, or this script's own
+  output quoted inside a transcript could forge a turn and have tool calls
+  attributed to it. `quote_framing` prefixes any content line matching
+  `FRAMING_RE` with `> `; `clip` is the chokepoint every content path goes
+  through, and `matching_lines` covers `search`. Keep `FRAMING_RE` tight: it
+  matched `=== banner ===` at first and fired on 326 lines of a 40-file sample,
+  because shell scripts echo that constantly. As written it fires on **zero**
+  lines of that sample, which is the bar - a false positive is pure noise in the
+  common case. The real truncation notice is appended *after* quoting, on
+  purpose; quoting it would break the `--full` hint.
 - **Turn numbers are stable across flags.** Numbering happens before filtering, so
   an `outline` and a later `show --range` always line up. Filtering must never
   renumber.
@@ -106,13 +118,16 @@ These were each found by breaking them. Regressions here are silent, not loud.
   of the turn.
 - **Tool results fold under their call** via `tool_use_id` → `tool_use.id`, not by
   document order.
-- **`main` forces UTF-8 on stdout.** The rendered glyphs `▶` and `⤷` do not exist
-  in cp1252, which is what Windows Python encodes to whenever stdout is a pipe
-  rather than a console — precisely how a tool harness reads it. Dropping
-  `force_utf8_output` breaks Windows two ways, and the quiet one is worse:
-  `show` dies on `▶`, while `outline` and `list` exit 0 having written bytes no
-  UTF-8 reader can decode. An interactive Windows console hides both, because
-  Python writes UTF-8 there.
+- **`main` forces UTF-8 on stdout.** Windows Python encodes to cp1252 whenever
+  stdout is a pipe rather than a console — precisely how a tool harness reads it.
+  Dropping `force_utf8_output` breaks Windows two ways, and the quiet one is
+  worse: `show` dies on the first codepoint cp1252 lacks, while `outline` and
+  `list` exit 0 having written bytes no UTF-8 reader can decode. An interactive
+  Windows console hides both, because Python writes UTF-8 there. This used to be
+  justified by the framing glyphs; since those went ASCII the exposure is the
+  *content* — emoji, CJK, the model's own em dashes — so the fixture in
+  `TestCrossPlatform` carries such codepoints deliberately. Do not "simplify"
+  them out.
 - **Nothing may assume `/` is the separator.** `C:\Users\me\proj` contains no
   forward slash, so the old `"/" in project` test sent native Windows paths to
   the substring-match branch, where they matched nothing. `looks_like_path` is
@@ -251,8 +266,19 @@ without a bump reaches no one.
 
 ## Conventions
 
-- Em dashes and `·` separators in rendered output; `▶` for a tool call, `⤷` for
-  its result, `!` for an abandoned turn.
+- Em dashes and `·` separators in rendered output; `->` for a tool call, `<-` for
+  its result, `!` for an abandoned turn, `> ` for a content line quoted because
+  it imitated framing.
+- **Framing is ASCII, and that is a measured decision, not taste.** Priced against
+  a byte-level BPE tokenizer over 40 real transcripts: `·` costs **0** tokens
+  (1,732 uses — it merges with its neighbours), `…` costs 6 tokens across 442
+  uses, and the old `▶` cost 0 under o200k but 2 under cl100k. The old `⤷`
+  (U+2937) cost **3 tokens every time**, 812 uses, and was single-handedly
+  responsible for 99.6% of the available saving — replacing the pair with `->`
+  and `<-` cut 0.410% of all rendered output. The lesson is not "avoid Unicode":
+  `·` is free and stays. It is that a *rare* codepoint is a tokenizer lottery,
+  and framing repeats once per tool call forever. Price a new glyph before
+  adding one, and prefer ASCII where the look is not doing real work.
 - Truncation is always visible — `... (+N lines, use --full)`, never a silent cut.
 - Docs are prose over bullet soup, and every claim about the format should be one
   you verified against real transcripts, not inferred.
